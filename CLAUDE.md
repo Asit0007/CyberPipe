@@ -253,20 +253,12 @@ Full Disk Access grant first, which is GUI-only.
 
 ## Running it locally
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env   # fill in TELEGRAM_BOT_TOKEN/CHAT_ID once you have a bot
-
-python3 submit_job.py --text "..." --url "https://..."
-python3 scheduler.py          # separate terminal — polls every 60s
-python3 telegram_poller.py    # separate terminal — only needed once Telegram is configured
-```
-
-Without Telegram configured, the job will still run through research → plan
-→ script and then sit in NEEDS_INPUT forever (no way to tap approve) — that's
-expected; it proves the pipeline and the rate-limit/backoff paths work, but
-manual DB surgery (`update_job(id, status="PENDING", ...)`) is the only way
-to unblock it until a bot token exists.
+See `README.md` for the quick-start commands and environment variables.
+One gotcha not obvious from there: without Telegram configured, a job sits
+in `NEEDS_INPUT` forever with no way to tap approve — manual DB surgery
+(`db.update_job(id, status="PENDING", pending_question=None,
+pending_payload=None)`) is the only way to unblock it until a bot token
+exists.
 
 ## Pitfalls
 
