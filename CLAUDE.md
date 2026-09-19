@@ -115,59 +115,62 @@ below.
   later. Doesn't recover the missing data, just surfaces it — there's
   nothing to recover it *with* until Stage 4 exists.
 - ~~No `VideoPlan.tone` value matches "authoritative, no fearmongering".~~
-  **Fixed to the extent possible:** `planSchema.tone` (`server/schemas.ts`)
-  is a hard Gemini-enforced enum of 4 literals — no request parameter can
-  change the `tone` field's actual value, only the surrounding prose. Kept
-  `"Deep Dive Documentary"` as the closest match and added
-  `DEFAULT_CYBER_TONE`, a fuller descriptive string sent as `targetTone` to
-  steer `hookStrategy`/`pacingStyle`/`narrativeBeats`. **Verified this has
-  limited effect**: a live test run still came back with `pacingStyle:
-  "Fast-cut with terminal memes, code alerts, and dramatic pauses"` — the
-  literal example value from `/api/plan`'s own prompt template in
-  `server.ts`. This is the same "inline example wins over instructions"
-  failure mode ContentPipe's own CLAUDE.md documents elsewhere
-  (`src/types.ts`/prompt-example drift causing `visual`/`motion` to go
-  missing) — here it means `targetTone` competing against a hardcoded
-  example rather than a schema gap. Fixing it for real means editing
-  ContentPipe's prompt template, which is out of scope for CyberPipe.
+  **Fixed.** `planSchema.tone` is still a hard Gemini-enforced enum of 4
+  literals — `"Deep Dive Documentary"` remains the closest match and
+  `DEFAULT_CYBER_TONE` (a fuller descriptive string sent as `targetTone`)
+  still only steers `hookStrategy`/`pacingStyle`/`narrativeBeats` prose, not
+  the `tone` field's value itself. What changed: a live test first showed
+  this had *no* real effect — `pacingStyle` came back as the literal example
+  string from `/api/plan`'s prompt template, the same "inline example wins
+  over instructions" failure ContentPipe's own CLAUDE.md documents elsewhere.
+  That genuinely needed a ContentPipe-side fix, which happened as part of
+  the duration-ceiling patch below: `generateSceneChunk` in `server.ts` now
+  branches its writer persona and narration-style instructions on
+  `videoPlan.tone === 'Deep Dive Documentary'` — an actual investigative-
+  documentary voice instead of the hardcoded infotainment one, for that tone
+  value only. Every other tone value keeps ContentPipe's original behavior.
 
-### New, more serious gap found while verifying the above (2026-09-19)
+### Duration ceiling — found 2026-09-19, fixed the same day in ContentPipe
 
-`server/schemas.ts` `scriptSchema.scenes` has **`minItems: 5, maxItems: 6`**,
-and the prompt instructs 8-15s of narration per scene — a hard ceiling
-around **90 seconds of total runtime**. A live test job came back with 5
-scenes and `estimatedTotalDuration: 58`. CyberPipe's spec target is
-**8-10 minutes (480-600s)** — roughly 6-7x more scenes than the schema will
-ever allow `/api/script` to return, at any pacing.
+`scriptSchema.scenes` had `minItems: 5, maxItems: 6` and 8-15s of narration
+per scene — a hard ceiling around 90 seconds, vs. CyberPipe's 8-10 minute
+target. `/api/plan` didn't even accept a duration parameter. **Fixed
+directly in ContentPipe** (option 1 from the original three — see that
+repo's `CLAUDE.md` "chunked script generation" section for the full
+writeup): `/api/plan` now honors a real `targetDurationSec`, and
+`/api/script` generates scenes in chunks sized to reach it, carrying prior
+scenes forward as context for continuity. `pipeline.py`'s `stage_plan` now
+sends `targetDurationSec` (default `DEFAULT_TARGET_DURATION_SEC = 540`, the
+spec's 8-10 minute midpoint) — before this fix it was never sent at all, so
+every script silently inherited ContentPipe's ~60s Shorts-style default.
 
-This is not a missing-field problem like the other four — it's a hard
-capacity ceiling on the endpoint CyberPipe's Stage 2/3 were built to reuse.
-`/api/plan` has the same shape: `targetDurationSec` isn't even a request
-parameter (only `researchData`/`targetFormat`/`targetTone` are read from the
-body) — it's a literal `60` in the prompt's inline JSON example, ignored
-regardless of what's sent. ContentPipe's script generation is built for
-Shorts/Reels/TikTok pacing (5-6 scenes, 8-15s each), not an 8-10 minute
-YouTube documentary — because that's what ContentPipe was actually built
-for; long-form cybersecurity documentaries were never its use case.
+**Two operational constraints surfaced while verifying this, worth knowing
+before assuming a script will always come back at full length:**
 
-**Not yet resolved. Real options, not yet decided:**
-1. Patch ContentPipe's `/api/plan`/`/api/script` to accept a real
-   `targetDurationSec` and raise the `scenes` schema ceiling — a generically
-   useful capability fix (any long-form use case hits this, not just
-   CyberPipe), backward-compatible (existing callers omitting the param get
-   identical default behavior). Crosses the "don't rewrite ContentPipe"
-   boundary from the original scoping decision, even if narrowly scoped.
-2. Have CyberPipe call `/api/script` multiple times (once per narrative act
-   from the plan) and stitch the results into one long-form script locally,
-   leaving ContentPipe's schema untouched.
-3. Accept ContentPipe's ~90s output as one *segment* and have CyberPipe's own
-   (unbuilt) Stage 2.5 expand/pad it into a full 8-10 minute structure before
-   Stage 3 image/video generation.
+1. **A real schema limit, not a bug.** ContentPipe's per-scene `infographic`
+   field's nesting makes Gemini hard-reject the request once a chunk's
+   `maxItems` reaches 4 — reproducible across every model, confirmed against
+   the *original, unmodified* schema too (it was always there, just never
+   exercised past 6 items before). This is why chunk size is 3 for the
+   narrative pass, not something larger — don't "optimize" it back up without
+   re-testing live first.
+2. **Gemini's free tier caps at 20 requests/day per model.** A 9-minute
+   script now needs ~25 internal Gemini calls (vs. 2-3 before), so a single
+   long-form script generation can burn through a meaningful chunk of a
+   day's quota by itself. Watch this against the bi-weekly cadence once
+   real production runs start — it's a capacity planning question, not
+   just a testing artifact.
 
-Whichever gets picked has to happen before the mid-roll markers this session
-just added mean anything — right now they degenerate to "after scene 5" for
-both the ~2:30 and ~6:00 targets, because the whole video is shorter than
-either target.
+`pipeline._compute_midroll_markers` now has a script long enough for the
+~2:30/~6:00 placement to mean something, instead of degenerating to "after
+the last scene" on a 58s draft.
+
+**Still true:** a chunk can fail partway (quota exhaustion, a weak-tier
+model going degenerate under load — both observed live) and the script
+comes back shorter than requested rather than failing outright. That's
+correct, intentional degradation on ContentPipe's side, but it means
+`estimatedTotalDuration` should always be checked against what was actually
+requested rather than assumed to match.
 
 ## Deployment — Mac via launchd (decided 2026-09-19)
 

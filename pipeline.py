@@ -65,6 +65,12 @@ DEFAULT_CYBER_TONE = (
     "enum: Deep Dive Documentary."
 )
 
+# Prompt 1's 8-10 minute target, midpoint. ContentPipe's /api/plan and
+# /api/script both honor targetDurationSec now (see ContentPipe's CLAUDE.md
+# for the chunked-generation fix) — previously this had nowhere to go and
+# every script defaulted to ContentPipe's ~60s Shorts-style pacing.
+DEFAULT_TARGET_DURATION_SEC = 540
+
 CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 
 # ~2:30 and ~6:00 dual mid-roll placement (Prompt 1 §Retention Engineering).
@@ -78,10 +84,10 @@ def next_stage_after(stage: str) -> str | None:
     return None
 
 
-def _post(path: str, body: dict[str, Any], provider: str) -> dict[str, Any]:
+def _post(path: str, body: dict[str, Any], provider: str, timeout: int | None = None) -> dict[str, Any]:
     url = f"{config.CONTENTPIPE_BASE_URL}{path}"
     try:
-        resp = requests.post(url, json=body, timeout=config.CONTENTPIPE_TIMEOUT_SECONDS)
+        resp = requests.post(url, json=body, timeout=timeout or config.CONTENTPIPE_TIMEOUT_SECONDS)
     except requests.RequestException as exc:
         raise RuntimeError(f"{path} request failed: {exc}") from exc
     if resp.status_code == 429:
@@ -169,6 +175,7 @@ def stage_plan(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]:
         "researchData": _reframe_research_for_forwarding(outputs["research"]),
         "targetFormat": payload.get("targetFormat", "16:9"),
         "targetTone": payload.get("targetTone", DEFAULT_CYBER_TONE),
+        "targetDurationSec": payload.get("targetDurationSec", DEFAULT_TARGET_DURATION_SEC),
     }
     return _post("/api/plan", body, provider="contentpipe:plan")
 
@@ -180,7 +187,7 @@ def stage_script(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]
         "researchData": _reframe_research_for_forwarding(outputs["research"]),
         "channelBrandName": payload.get("channelBrandName", "CyberPipe"),
     }
-    draft = _post("/api/script", body, provider="contentpipe:script")
+    draft = _post("/api/script", body, provider="contentpipe:script", timeout=config.CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS)
     draft["cyberpipe_midroll_markers"] = _compute_midroll_markers(draft.get("scenes") or [])
 
     scene_count = len(draft.get("scenes", []))

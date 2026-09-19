@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 
 import db
-from pipeline import PIPELINE_STAGES
+from pipeline import DEFAULT_CYBER_TONE, DEFAULT_TARGET_DURATION_SEC, PIPELINE_STAGES
 
 
 def main() -> None:
@@ -20,7 +20,8 @@ def main() -> None:
     parser.add_argument("--url", action="append", default=[], dest="urls", help="Source URL (repeatable)")
     parser.add_argument("--channel-name", default="CyberPipe")
     parser.add_argument("--target-format", default="16:9", choices=["16:9", "9:16"])
-    parser.add_argument("--target-tone", default="Deep Dive Documentary")
+    parser.add_argument("--target-tone", default=DEFAULT_CYBER_TONE)
+    parser.add_argument("--target-duration-sec", type=int, default=DEFAULT_TARGET_DURATION_SEC)
     args = parser.parse_args()
 
     db.init_db()
@@ -32,6 +33,7 @@ def main() -> None:
             "channelBrandName": args.channel_name,
             "targetFormat": args.target_format,
             "targetTone": args.target_tone,
+            "targetDurationSec": args.target_duration_sec,
         },
         first_stage=PIPELINE_STAGES[0],
     )

@@ -33,6 +33,13 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 # --- ContentPipe (stages 1-3 call its API rather than reimplementing it) ---
 CONTENTPIPE_BASE_URL = os.environ.get("CONTENTPIPE_BASE_URL", "http://localhost:3000")
 CONTENTPIPE_TIMEOUT_SECONDS = int(os.environ.get("CONTENTPIPE_TIMEOUT_SECONDS", "180"))
+# /api/script now makes many sequential Gemini calls internally (one per
+# narrative/visual-direction chunk — see ContentPipe's CLAUDE.md) rather than
+# 2-3. Measured live 2026-09-19 under a free-tier quota crunch: individual
+# 429s alone added 11-59s of retry wait each, across up to ~25 chunks — the
+# old 180s default isn't close. This runs as a background job, not something
+# a human is blocked on, so a long ceiling costs nothing in the common case.
+CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS = int(os.environ.get("CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS", "1800"))
 
 # --- Persistence -------------------------------------------------------------
 DB_PATH = os.environ.get("DB_PATH", str(BASE_DIR / "pipeline.db"))
