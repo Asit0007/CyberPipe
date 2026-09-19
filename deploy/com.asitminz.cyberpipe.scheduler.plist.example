@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Continuous scheduler on a macOS laptop -- the 60s poll loop that dispatches
+  due jobs, not a once-a-day batch. That's a deliberately different launchd
+  shape from JobPipe's: RunAtLoad + KeepAlive instead of StartCalendarInterval.
+
+  Build the launcher bundle first - deploy/build-launcher.sh - then copy this
+  to ~/Library/LaunchAgents/, replacing __REPO_ROOT__ with this repo's
+  absolute path and __HOME__ with your home directory, then:
+
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.asitminz.cyberpipe.scheduler.plist
+      launchctl print gui/$(id -u)/com.asitminz.cyberpipe.scheduler   # verify
+      launchctl kickstart -p gui/$(id -u)/com.asitminz.cyberpipe.scheduler   # (re)start it now
+
+  To remove:
+      launchctl bootout gui/$(id -u)/com.asitminz.cyberpipe.scheduler
+
+  WHY KeepAlive INSTEAD OF StartCalendarInterval: this process is supposed to
+  be running all the time, not fired at a specific minute. macOS suspends it
+  (not kills it) across sleep and resumes it on wake, so a poll loop's
+  time.sleep(60) just runs a little long across a nap -- nothing is "missed"
+  the way JobPipe's single daily firing can be. KeepAlive relaunches it if it
+  ever exits (crash or otherwise); RunAtLoad starts it the moment this Agent
+  is loaded, i.e. at every login.
+
+  STILL TRUE HERE, SAME AS JOBPIPE: a Mac that is fully powered OFF runs
+  nothing -- no rate-limit retries fire, no Telegram taps get processed, jobs
+  just sit until the Mac boots and this Agent loads again. That's the actual
+  cost of choosing a laptop over an always-on VPS; launchd only closes the gap
+  between "scheduled" and "scheduled and it happened" for sleep, not for off.
+  See CyberPipe/CLAUDE.md's deployment section before assuming this is
+  production-grade 24/7 durability.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.asitminz.cyberpipe.scheduler</string>
+
+    <!-- NOT scheduler.py directly, and not /bin/bash either. macOS TCC guards
+         ~/Documents and launchd has no grant there -- same failure JobPipe
+         measured 2026-09-10 (exit 126 on the exec itself). A grant has to
+         attach to a code identity, so it attaches to this bundle - built by
+         deploy/build-launcher.sh, granted once in System Settings > Privacy &
+         Security > Full Disk Access. Children inherit the attribution, which
+         is how the venv python underneath ends up able to read the repo. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/Applications/CyberPipe Services.app/Contents/MacOS/CyberPipeServices</string>
+        <!-- Explicit, never defaulted -- run-service.sh refuses to run with
+             no argument precisely so a stray LaunchServices launch of the
+             bundle cannot start a background service unattended. -->
+        <string>scheduler</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Minimum gap between restart attempts if it keeps crashing on launch,
+         so a bad deploy doesn't spin CPU and fill the log in a tight loop. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <!-- The service's own output goes to data/logs/scheduler.log; these two
+         catch what fails BEFORE run-service.sh can log anything itself. -->
+    <key>StandardOutPath</key>
+    <string>__REPO_ROOT__/data/logs/launchd-scheduler.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO_ROOT__/data/logs/launchd-scheduler.err.log</string>
+</dict>
+</plist>

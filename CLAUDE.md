@@ -109,16 +109,84 @@ Verified against ContentPipe's actual `src/types.ts` on 2026-09-19:
   urgent, no fearmongering" — `stage_plan` currently defaults to
   `"Deep Dive Documentary"` as the closest fit.
 
-## Deployment target — open decision
+## Deployment — Mac via launchd (decided 2026-09-19)
 
-The original spec assumes a Linux VPS (systemd units, always-on). Nothing's
-provisioned yet. If this instead runs on the same Mac as JobPipe/quant_bot,
-note that `scheduler.py`'s 60s poll needs to be *continuously* alive, unlike
-JobPipe's once-daily cron — JobPipe's own CLAUDE.md (§7.56, §7.58) documents
-that launchd only replays a `StartCalendarInterval` missed while the Mac was
-*asleep*, never while it was *powered off*, which is a much bigger problem
-for something that's supposed to be polling every minute. Resolve this
-before writing systemd units or a launchd plist for these two processes.
+The original spec assumed a Linux VPS with systemd units. Decision: run on
+the same Mac as JobPipe/quant_bot instead, via launchd — no VPS provisioned
+or planned right now.
+
+**Same TCC problem as JobPipe, same fix.** CyberPipe lives under
+`~/Documents` too, so a bare LaunchAgent calling `scheduler.py` or
+`bash run-service.sh` directly gets the identical exit-126 exec denial
+JobPipe measured 2026-09-10 — launchd holds no Documents-folder grant, only
+Terminal/VS Code/Claude Code do. The fix is the same trick: a signed,
+ad-hoc-codesigned Mach-O in `~/Applications/CyberPipe Services.app` that TCC
+can be handed a Full Disk Access grant for, which `run-service.sh` and
+everything under it (the venv python, the repo) inherits by
+responsible-process attribution. See `deploy/cyberpipe-launcher.c` for the
+full writeup — it's deliberately the same shape as
+`../JobPipe/deploy/jobpipe-launcher.c`.
+
+**Different launchd shape from JobPipe, because the workload is different.**
+JobPipe is a once-a-day batch job, so it uses `StartCalendarInterval` and
+relies on launchd replaying a firing missed while the Mac was asleep.
+CyberPipe's `scheduler.py` and `telegram_poller.py` are meant to run
+*continuously*, so both LaunchAgents use `RunAtLoad + KeepAlive` instead —
+start when the Agent loads (login), restart on any exit. This is actually a
+better fit for sleep than JobPipe's problem: macOS suspends a running
+process across sleep rather than killing it, so `scheduler.py`'s
+`time.sleep(60)` loop just runs a little long across a nap instead of
+missing a narrow firing window entirely.
+
+**One launcher bundle, two LaunchAgents.** Building two separate signed
+bundles would mean clicking through the Full Disk Access grant twice.
+Instead `deploy/run-service.sh` takes `scheduler` or `poller` as an argument
+and dispatches to the right python module; `deploy/com.asitminz.cyberpipe.
+scheduler.plist.example` and `.poller.plist.example` both point at the same
+bundle with different arguments.
+
+**What's still true regardless of launchd:** a Mac that's fully powered off
+runs nothing — no rate-limit retries fire, no Telegram taps get processed,
+jobs just sit until it boots and the Agents reload. `RunAtLoad`/`KeepAlive`
+only closes the "asleep" gap, not the "off" one. Per the outer workspace
+CLAUDE.md's own framing: treat this LaunchAgent setup as a convenience for a
+laptop that's usually on, not as production-grade 24/7 durability — that
+would still mean a VPS if it ever matters (e.g. once Telegram approvals need
+to be timely even with the laptop closed for a day).
+
+**Setup**, once `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are in `.env` (the
+poller runs fine before that too — see `deploy/*.plist.example` headers):
+
+```bash
+python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+./deploy/build-launcher.sh
+# GUI step, cannot be scripted:
+#   System Settings > Privacy & Security > Full Disk Access > +
+#   > ~/Applications/CyberPipe Services.app > turn it on
+
+cp deploy/com.asitminz.cyberpipe.scheduler.plist.example \
+   ~/Library/LaunchAgents/com.asitminz.cyberpipe.scheduler.plist
+cp deploy/com.asitminz.cyberpipe.poller.plist.example \
+   ~/Library/LaunchAgents/com.asitminz.cyberpipe.poller.plist
+# then replace __REPO_ROOT__ and __HOME__ in both copies with real paths
+
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.asitminz.cyberpipe.scheduler.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.asitminz.cyberpipe.poller.plist
+launchctl print gui/$(id -u)/com.asitminz.cyberpipe.scheduler   # verify running
+launchctl print gui/$(id -u)/com.asitminz.cyberpipe.poller
+```
+
+Logs land in `data/logs/scheduler.log` and `data/logs/poller.log` (the
+services' own stdout, appended across restarts) plus
+`data/logs/launchd-{scheduler,poller}.{out,err}.log` (anything that fails
+before the script itself can log). None of `data/`, the venv, or the built
+`.app` bundle are committed.
+
+Compiled and smoke-tested 2026-09-19: `build-launcher.sh` produces a
+correctly signed bundle, and invoking it directly with `scheduler` / `poller`
+confirmed the full dispatch chain (bundle → bash → venv python → the
+service) works. Not yet bootstrapped into launchd — that needs the manual
+Full Disk Access grant first, which is GUI-only.
 
 ## Running it locally
 

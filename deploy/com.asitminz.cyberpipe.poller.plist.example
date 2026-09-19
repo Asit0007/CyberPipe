@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Continuous Telegram long-poller on a macOS laptop -- companion to
+  com.asitminz.cyberpipe.scheduler.plist.example, same bundle, same rationale
+  (see that file's header for the full TCC / KeepAlive writeup, not repeated
+  here). This one just passes "poller" instead of "scheduler".
+
+  telegram_poller.py itself exits immediately and logs a message if
+  TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID aren't set in .env yet -- safe to
+  install this before a bot exists; KeepAlive will just keep relaunching a
+  fast no-op until you add the token, at which point the very next restart
+  picks it up (edit .env, then `launchctl kickstart -p ...poller`).
+
+  Build the launcher bundle first - deploy/build-launcher.sh - then copy this
+  to ~/Library/LaunchAgents/, replacing __REPO_ROOT__ with this repo's
+  absolute path and __HOME__ with your home directory, then:
+
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.asitminz.cyberpipe.poller.plist
+      launchctl print gui/$(id -u)/com.asitminz.cyberpipe.poller   # verify
+      launchctl kickstart -p gui/$(id -u)/com.asitminz.cyberpipe.poller   # (re)start it now
+
+  To remove:
+      launchctl bootout gui/$(id -u)/com.asitminz.cyberpipe.poller
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.asitminz.cyberpipe.poller</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/Applications/CyberPipe Services.app/Contents/MacOS/CyberPipeServices</string>
+        <string>poller</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__REPO_ROOT__/data/logs/launchd-poller.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO_ROOT__/data/logs/launchd-poller.err.log</string>
+</dict>
+</plist>
