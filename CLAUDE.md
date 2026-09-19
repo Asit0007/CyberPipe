@@ -84,30 +84,90 @@ A COMPLETED job today just means "script approved" — there is no stage after
 `script` yet. That's intentional: `pipeline.PIPELINE_STAGES` is the seam
 where stages 4/5 get appended once their providers are chosen and keyed.
 
-## Known integration gaps vs. the original prompt spec
+## Integration gaps vs. the original prompt spec
 
-Verified against ContentPipe's actual `src/types.ts` on 2026-09-19:
+Verified against ContentPipe's actual `src/types.ts` and `server/schemas.ts`.
+The first four were fixed 2026-09-19, entirely inside `pipeline.py` — no
+ContentPipe changes, keeping the "calls the API, doesn't rewrite it"
+boundary from the scoping decision. The fifth was discovered the same day
+while verifying the fix and is **not fixable from CyberPipe's side** — see
+below.
 
-- The spec's Stage 1 output assumes `entities`, technical artifacts
-  (CVE ids/hashes/code snippets), and `visual cues`. ContentPipe's
-  `ResearchData` has none of these — it has `hnCommunitySentiment` and
-  `infotainmentAngles` instead, left over from ContentPipe's original
-  tech/HN framing. These don't fit "authoritative, no fearmongering"
-  cybersecurity tone and are currently passed through unfiltered into the
-  script prompt.
-- The spec's Stage 2 output assumes top-level `retention_beats[]` and
-  `midroll_markers[]`. `VideoScript` has neither — only an optional
-  per-scene `retentionNote` string. **The ~2:30/~6:00 mid-roll timestamps
-  are not computed anywhere yet** — they need to be derived from cumulative
-  `scene.durationEst` once stage 4/5 exist, not fetched from the API.
-- `characterBible`/`styleGuide` (which hero-image consistency in stage 4
-  will depend on) are optional fields that ContentPipe's own CLAUDE.md
-  documents as sometimes silently dropped by the model on large schemas.
-  Stage 4, whenever it's built, needs a fallback for their absence, not an
-  assumption they're always present.
-- No `VideoPlan.tone` value matches "authoritative, investigative, slightly
-  urgent, no fearmongering" — `stage_plan` currently defaults to
-  `"Deep Dive Documentary"` as the closest fit.
+- ~~Stage 1 output assumes `entities`/CVE ids/`visual cues`; ContentPipe's
+  `ResearchData` has none, and its `hnCommunitySentiment`/
+  `infotainmentAngles` leak HN/infotainment framing into the script
+  prompt.~~ **Fixed:** `_extract_cve_ids` does a narrow regex pass for CVE
+  ids (general entity extraction would need its own model call to do
+  honestly, so it isn't attempted); `_reframe_research_for_forwarding` drops
+  `hnCommunitySentiment`/`infotainmentAngles` from what's sent to `/api/plan`
+  and `/api/script` (neither endpoint validates its input shape — both just
+  `JSON.stringify` it into the prompt). `stage_outputs['research']` still
+  keeps ContentPipe's original, unmodified response.
+- ~~No top-level `retention_beats[]`/`midroll_markers[]`.~~ **Fixed:**
+  `_compute_midroll_markers` derives the ~2:30/~6:00 placement locally from
+  cumulative `scene.durationEst`, snapped to the nearest scene boundary,
+  stashed as `cyberpipe_midroll_markers` on the script draft.
+- ~~`characterBible`/`styleGuide` are optional and sometimes silently
+  dropped.~~ **Partially fixed:** `_script_coverage_warnings` checks for
+  their absence (and per-scene `visual`/`motion` coverage) and appends
+  warnings to the Telegram approval question, so a human sees "⚠️ no
+  styleGuide" before approving rather than Stage 4 discovering it silently
+  later. Doesn't recover the missing data, just surfaces it — there's
+  nothing to recover it *with* until Stage 4 exists.
+- ~~No `VideoPlan.tone` value matches "authoritative, no fearmongering".~~
+  **Fixed to the extent possible:** `planSchema.tone` (`server/schemas.ts`)
+  is a hard Gemini-enforced enum of 4 literals — no request parameter can
+  change the `tone` field's actual value, only the surrounding prose. Kept
+  `"Deep Dive Documentary"` as the closest match and added
+  `DEFAULT_CYBER_TONE`, a fuller descriptive string sent as `targetTone` to
+  steer `hookStrategy`/`pacingStyle`/`narrativeBeats`. **Verified this has
+  limited effect**: a live test run still came back with `pacingStyle:
+  "Fast-cut with terminal memes, code alerts, and dramatic pauses"` — the
+  literal example value from `/api/plan`'s own prompt template in
+  `server.ts`. This is the same "inline example wins over instructions"
+  failure mode ContentPipe's own CLAUDE.md documents elsewhere
+  (`src/types.ts`/prompt-example drift causing `visual`/`motion` to go
+  missing) — here it means `targetTone` competing against a hardcoded
+  example rather than a schema gap. Fixing it for real means editing
+  ContentPipe's prompt template, which is out of scope for CyberPipe.
+
+### New, more serious gap found while verifying the above (2026-09-19)
+
+`server/schemas.ts` `scriptSchema.scenes` has **`minItems: 5, maxItems: 6`**,
+and the prompt instructs 8-15s of narration per scene — a hard ceiling
+around **90 seconds of total runtime**. A live test job came back with 5
+scenes and `estimatedTotalDuration: 58`. CyberPipe's spec target is
+**8-10 minutes (480-600s)** — roughly 6-7x more scenes than the schema will
+ever allow `/api/script` to return, at any pacing.
+
+This is not a missing-field problem like the other four — it's a hard
+capacity ceiling on the endpoint CyberPipe's Stage 2/3 were built to reuse.
+`/api/plan` has the same shape: `targetDurationSec` isn't even a request
+parameter (only `researchData`/`targetFormat`/`targetTone` are read from the
+body) — it's a literal `60` in the prompt's inline JSON example, ignored
+regardless of what's sent. ContentPipe's script generation is built for
+Shorts/Reels/TikTok pacing (5-6 scenes, 8-15s each), not an 8-10 minute
+YouTube documentary — because that's what ContentPipe was actually built
+for; long-form cybersecurity documentaries were never its use case.
+
+**Not yet resolved. Real options, not yet decided:**
+1. Patch ContentPipe's `/api/plan`/`/api/script` to accept a real
+   `targetDurationSec` and raise the `scenes` schema ceiling — a generically
+   useful capability fix (any long-form use case hits this, not just
+   CyberPipe), backward-compatible (existing callers omitting the param get
+   identical default behavior). Crosses the "don't rewrite ContentPipe"
+   boundary from the original scoping decision, even if narrowly scoped.
+2. Have CyberPipe call `/api/script` multiple times (once per narrative act
+   from the plan) and stitch the results into one long-form script locally,
+   leaving ContentPipe's schema untouched.
+3. Accept ContentPipe's ~90s output as one *segment* and have CyberPipe's own
+   (unbuilt) Stage 2.5 expand/pad it into a full 8-10 minute structure before
+   Stage 3 image/video generation.
+
+Whichever gets picked has to happen before the mid-roll markers this session
+just added mean anything — right now they degenerate to "after scene 5" for
+both the ~2:30 and ~6:00 targets, because the whole video is shorter than
+either target.
 
 ## Deployment — Mac via launchd (decided 2026-09-19)
 
