@@ -1,0 +1,58 @@
+"""Environment loading and tunables. Stdlib only — no python-dotenv dependency.
+
+.env is read once at import time. Restart scheduler.py / telegram_poller.py
+after editing it (same gotcha as ContentPipe's server.ts).
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def _load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+_load_dotenv(BASE_DIR / ".env")
+
+# --- Telegram ---------------------------------------------------------------
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+# --- ContentPipe (stages 1-3 call its API rather than reimplementing it) ---
+CONTENTPIPE_BASE_URL = os.environ.get("CONTENTPIPE_BASE_URL", "http://localhost:3000")
+CONTENTPIPE_TIMEOUT_SECONDS = int(os.environ.get("CONTENTPIPE_TIMEOUT_SECONDS", "180"))
+
+# --- Persistence -------------------------------------------------------------
+DB_PATH = os.environ.get("DB_PATH", str(BASE_DIR / "pipeline.db"))
+
+# --- Scheduler ---------------------------------------------------------------
+POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "60"))
+NEEDS_INPUT_TIMEOUT_HOURS = int(os.environ.get("NEEDS_INPUT_TIMEOUT_HOURS", "72"))
+
+# --- Retry / backoff ----------------------------------------------------------
+# Generic per-stage failures (not rate limits): 5m, 15m, 45m, 2h, 6h — matches
+# cyberpipeline-prompts.md Prompt 3. Rate limits use rate_limiter.py instead.
+MAX_STAGE_ATTEMPTS = int(os.environ.get("MAX_STAGE_ATTEMPTS", "5"))
+BACKOFF_SCHEDULE_SECONDS = [300, 900, 2700, 7200, 21600]
+
+# Fallback cooldown when a RateLimitError carries no Retry-After and no known
+# provider daily-reset time.
+DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 24 * 3600
+
+# Provider daily-reset times, UTC "HH:MM". Empty until stage 3+ call
+# providers directly — the current stages 1-3 proxy through ContentPipe,
+# which already does its own Gemini fallback/backoff internally, so a 429
+# surfacing here just means ContentPipe itself is exhausted or down.
+PROVIDER_DAILY_RESET_UTC: dict[str, str] = {}

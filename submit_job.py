@@ -1,0 +1,42 @@
+"""CLI to enqueue a job for manual testing, e.g.:
+
+    python3 submit_job.py --text "CVE-2026-XXXX: ..." --url "https://..." --url "https://..."
+
+The scheduler picks it up on its next 60s tick. Real ingestion (Telegram
+forward, CVE feed, etc.) is a later phase — this is just enough to exercise
+the orchestrator end to end.
+"""
+from __future__ import annotations
+
+import argparse
+
+import db
+from pipeline import PIPELINE_STAGES
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Enqueue a CyberPipe job")
+    parser.add_argument("--text", required=True, help="The news story / breach report / CVE text")
+    parser.add_argument("--url", action="append", default=[], dest="urls", help="Source URL (repeatable)")
+    parser.add_argument("--channel-name", default="CyberPipe")
+    parser.add_argument("--target-format", default="16:9", choices=["16:9", "9:16"])
+    parser.add_argument("--target-tone", default="Deep Dive Documentary")
+    args = parser.parse_args()
+
+    db.init_db()
+    job_id = db.create_job(
+        input_payload={
+            "messageText": args.text,
+            "sourceUrls": args.urls,
+            "channelName": args.channel_name,
+            "channelBrandName": args.channel_name,
+            "targetFormat": args.target_format,
+            "targetTone": args.target_tone,
+        },
+        first_stage=PIPELINE_STAGES[0],
+    )
+    print(f"Created job #{job_id}, stage={PIPELINE_STAGES[0]}. Start scheduler.py to run it.")
+
+
+if __name__ == "__main__":
+    main()
