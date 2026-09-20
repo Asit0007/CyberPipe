@@ -5,7 +5,8 @@ Sibling repo to `../ContentPipe/` — this project does not reimplement
 research/script generation, it calls ContentPipe's existing API for that.
 Full product spec lives in `../ContentPipe/cyberpipeline-prompts.md`
 (7 prompts + 2 appendices) — read that for tone, format, monetization, and
-retention-engineering requirements. This file covers the orchestrator layer
+retention-engineering requirements. (That file is **gitignored** in ContentPipe,
+so it exists only on this machine — it will not be in a fresh clone.) This file covers the orchestrator layer
 only: what's built, what's stubbed, and what's still a gap.
 
 ## Why a separate repo from ContentPipe
@@ -106,7 +107,10 @@ below.
 - ~~No top-level `retention_beats[]`/`midroll_markers[]`.~~ **Fixed:**
   `_compute_midroll_markers` derives the ~2:30/~6:00 placement locally from
   cumulative `scene.durationEst`, snapped to the nearest scene boundary,
-  stashed as `cyberpipe_midroll_markers` on the script draft.
+  stashed as `cyberpipe_midroll_markers` on the script draft. ContentPipe now
+  computes this itself (`midrollMarkers`, with the >= 8:00 eligibility rule,
+  plus chapters and a `qualityChecks` audit) and `_server_midroll_markers`
+  prefers it; the local function is the fallback for an older ContentPipe.
 - ~~`characterBible`/`styleGuide` are optional and sometimes silently
   dropped.~~ **Partially fixed:** `_script_coverage_warnings` checks for
   their absence (and per-scene `visual`/`motion` coverage) and appends
@@ -165,12 +169,42 @@ before assuming a script will always come back at full length:**
 ~2:30/~6:00 placement to mean something, instead of degenerating to "after
 the last scene" on a 58s draft.
 
-**Still true:** a chunk can fail partway (quota exhaustion, a weak-tier
-model going degenerate under load — both observed live) and the script
-comes back shorter than requested rather than failing outright. That's
-correct, intentional degradation on ContentPipe's side, but it means
-`estimatedTotalDuration` should always be checked against what was actually
-requested rather than assumed to match.
+### Fail-closed contract — found and fixed 2026-09-19 (both repos)
+
+ContentPipe's default contract is "always return something": on quota
+exhaustion or an outage every endpoint answered **HTTP 200 with canned
+XZ-backdoor content** flagged `isQuotaFallback`. `_post` only reacted to HTTP
+429, which ContentPipe never sent, so the rate-limit path in `worker.py` was
+unreachable for stages 1-3, and a rate-limited run put fake research → plan →
+script in front of the Telegram approver as a real draft. (Reproduced live: a
+brief `503 high demand` from all three models produced exactly that.)
+
+`_post` now sends `X-ContentPipe-Strict: 1`. ContentPipe then answers
+`429` + `Retry-After` for quota (a daily limit → seconds until midnight
+Pacific), `503` + `Retry-After` for overload, `502` for non-retryable
+failures — and never fallback content. A 429 becomes
+`RateLimitError(retry_at=<Retry-After>)`, which `worker.py` already honours as
+`explicit_retry_at`. An `isQuotaFallback` body is still rejected defensively
+(older ContentPipe). 503/502 take the generic backoff path.
+
+**Resume needs nothing from CyberPipe.** ContentPipe checkpoints every finished
+chunk of a script to `.runs/` and resumes an interrupted run when the *same*
+request arrives again (keyed by a hash of plan + research + brand); a
+delivered run is never replayed, so "regenerate" still starts fresh. That
+matters: a 9-minute script is ~25 Gemini calls against ~20/day per model, so
+restarting from zero after a quota hit would never converge.
+
+A script still comes back with `generation` (`complete`, requested vs produced
+scenes, `degraded[]`) and `qualityChecks`. The approval question appends the
+worst few audit lines (errors first) as `🔎` rows, so the human sees "runtime
+83% of target" or "narration states a CVE not in the sources" before tapping
+approve. `_script_coverage_warnings` is now largely redundant with
+`generation` but harmless.
+
+Verified end to end 2026-09-19 with CyberPipe's real `stage_script` against the
+real ContentPipe (stub upstream): daily-quota fault → `RateLimitError` whose
+`retry_at` matched midnight Pacific; after a simulated reset → the approval
+checkpoint, having re-spent only the unfinished calls.
 
 ## Deployment — Mac via launchd (decided 2026-09-19)
 
@@ -266,5 +300,6 @@ exists.
 |---|---|
 | `.env` read once | Same gotcha as ContentPipe — restart `scheduler.py`/`telegram_poller.py` after editing `.env`. |
 | Stale button taps | `worker.resume_from_input` checks `job.status == "NEEDS_INPUT"` before acting, so a tap on an old message for an already-resolved job is a silent no-op, not a crash. |
+| Strict header | Stages 1-3 rely on `X-ContentPipe-Strict: 1` (in `pipeline.STRICT_HEADERS`). Without it ContentPipe returns canned content with HTTP 200 on quota exhaustion. Don't drop it when refactoring `_post`. |
 | ContentPipe must be running | Stages 1-3 are plain HTTP calls to `CONTENTPIPE_BASE_URL`. If ContentPipe isn't up, every job fails with a connection error and goes through the generic backoff path, not the rate-limit path. |
 | WAL mode + concurrent processes | `scheduler.py` and `telegram_poller.py` both open their own connections via `db.get_connection()`; SQLite WAL handles this fine at this scale. Move to Postgres only if running >5 workers (per the original spec's own threshold — not needed now). |

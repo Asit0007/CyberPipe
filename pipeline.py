@@ -51,6 +51,7 @@ from typing import Any
 import requests
 
 import config
+import rate_limiter
 from exceptions import HumanInputRequired, RateLimitError
 
 PIPELINE_STAGES = ["research", "plan", "script"]
@@ -84,17 +85,36 @@ def next_stage_after(stage: str) -> str | None:
     return None
 
 
+# ContentPipe's default contract is "always return something": on quota exhaustion it answers
+# HTTP 200 with canned XZ-backdoor content flagged `isQuotaFallback`, which is right for its UI
+# and wrong for an orchestrator — this file used to hand that to the human approver as a real
+# draft, and the 429 branch below could never fire. This header opts out: ContentPipe then
+# answers 429 + Retry-After (quota), 503 + Retry-After (overload) or 502 (non-retryable),
+# and an interrupted /api/script resumes from its last finished chunk on the identical re-POST.
+STRICT_HEADERS = {"X-ContentPipe-Strict": "1"}
+
+
 def _post(path: str, body: dict[str, Any], provider: str, timeout: int | None = None) -> dict[str, Any]:
     url = f"{config.CONTENTPIPE_BASE_URL}{path}"
     try:
-        resp = requests.post(url, json=body, timeout=timeout or config.CONTENTPIPE_TIMEOUT_SECONDS)
+        resp = requests.post(url, json=body, headers=STRICT_HEADERS, timeout=timeout or config.CONTENTPIPE_TIMEOUT_SECONDS)
     except requests.RequestException as exc:
         raise RuntimeError(f"{path} request failed: {exc}") from exc
     if resp.status_code == 429:
-        raise RateLimitError(provider, message=f"{path} returned 429")
+        # Retry-After is when the quota resets (seconds until midnight Pacific for a daily
+        # limit), so the scheduler wakes at the right moment instead of guessing.
+        raise RateLimitError(
+            provider,
+            retry_at=rate_limiter.parse_retry_after(resp.headers.get("Retry-After")),
+            message=f"{path} returned 429: {resp.text[:300]}",
+        )
     if not resp.ok:
         raise RuntimeError(f"{path} returned {resp.status_code}: {resp.text[:500]}")
-    return resp.json()
+    data = resp.json()
+    # Belt and braces for an older ContentPipe that ignores the header.
+    if isinstance(data, dict) and data.get("isQuotaFallback"):
+        raise RateLimitError(provider, message=f"{path} returned canned fallback content (isQuotaFallback); refusing to treat it as real output")
+    return data
 
 
 def _extract_cve_ids(research: dict[str, Any]) -> list[str]:
@@ -138,6 +158,36 @@ def _compute_midroll_markers(scenes: list[dict[str, Any]]) -> list[dict[str, Any
             "actualSec": actual_sec,
         })
     return markers
+
+
+def _server_midroll_markers(draft: dict[str, Any]) -> list[dict[str, Any]]:
+    """ContentPipe now places mid-rolls itself (eligibility >= 8:00, snapped to scene
+    boundaries, semantic preference). Convert its markers to this module's shape; an empty
+    list means "use the local fallback" (an older ContentPipe, or nothing placeable)."""
+    scenes = draft.get("scenes") or []
+    markers = []
+    for m in draft.get("midrollMarkers") or []:
+        idx = int(m.get("afterSceneNumber", 0)) - 1
+        if not 0 <= idx < len(scenes):
+            continue
+        markers.append({
+            "targetSec": m.get("targetSec"),
+            "afterSceneIndex": idx,
+            "afterSceneId": scenes[idx].get("id"),
+            "actualSec": m.get("atSec"),
+            "reason": m.get("reason"),
+        })
+    return markers
+
+
+def _quality_check_notes(draft: dict[str, Any], limit: int = 4) -> list[str]:
+    """The worst of ContentPipe's deterministic audit (errors first), one short line each,
+    for the approval message. The full list stays on the draft for anyone who wants it."""
+    checks = [c for c in (draft.get("qualityChecks") or []) if c.get("severity") in ("error", "warn")]
+    notes = [f"{c['severity'].upper()} {c.get('id')}: {str(c.get('message', ''))[:140]}" for c in checks[:limit]]
+    if len(checks) > limit:
+        notes.append(f"+{len(checks) - limit} more in the draft's qualityChecks")
+    return notes
 
 
 def _script_coverage_warnings(draft: dict[str, Any]) -> list[str]:
@@ -188,7 +238,7 @@ def stage_script(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]
         "channelBrandName": payload.get("channelBrandName", "CyberPipe"),
     }
     draft = _post("/api/script", body, provider="contentpipe:script", timeout=config.CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS)
-    draft["cyberpipe_midroll_markers"] = _compute_midroll_markers(draft.get("scenes") or [])
+    draft["cyberpipe_midroll_markers"] = _server_midroll_markers(draft) or _compute_midroll_markers(draft.get("scenes") or [])
 
     scene_count = len(draft.get("scenes", []))
     total_duration = draft.get("estimatedTotalDuration", 0)
@@ -199,6 +249,9 @@ def stage_script(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]
     )
     if warnings:
         question += "\n⚠️ " + "; ".join(warnings)
+    audit = _quality_check_notes(draft)
+    if audit:
+        question += "\n🔎 " + "\n🔎 ".join(audit)
 
     # Mandatory human checkpoint (cyberpipeline-prompts.md Prompt 1 §Stage 2).
     # worker.py stashes `payload` as job.pending_payload; approving commits it

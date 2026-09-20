@@ -37,6 +37,12 @@ python3 scheduler.py          # separate terminal — polls every 60s, runs due 
 python3 telegram_poller.py    # separate terminal — only needed once TELEGRAM_* is set
 ```
 
+Every ContentPipe call sends `X-ContentPipe-Strict: 1`, so a quota hit or outage
+comes back as `429`/`503` with `Retry-After` — which becomes a scheduled retry at
+the right time — rather than canned sample content that would look like a real
+draft. An interrupted script resumes from ContentPipe's last finished chunk when
+the job retries. Details in `CLAUDE.md` ("Fail-closed contract").
+
 `scheduler.py` picks up the job on its next tick and runs it through
 research → plan → script. Without `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
 set, it'll stop at the script-approval checkpoint with no way to tap
@@ -67,7 +73,7 @@ the rate-limit/backoff paths work.
 |---|---|
 | 1. Research | Built — calls ContentPipe `/api/research` |
 | 2. Plan | Built — calls ContentPipe `/api/plan`, including target video duration |
-| 3. Script | Built — calls ContentPipe `/api/script`, mandatory Telegram approve/regenerate checkpoint |
+| 3. Script | Built — calls ContentPipe `/api/script`, mandatory Telegram approve/regenerate checkpoint; the approval message includes ContentPipe's audit findings (runtime shortfall, unsourced figures, mid-roll eligibility) |
 | 4. Image/video generation | Not started — no TTS/image/video provider keys yet |
 | 5. FFmpeg/Remotion assembly | Not started |
 | Telegram `/status /jobs /retry ...` dashboard | Not started — only the approve/regenerate buttons work today |
