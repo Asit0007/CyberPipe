@@ -238,6 +238,10 @@ def stage_research(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, An
     body = {
         "messageText": payload["messageText"],
         "sourceUrls": payload.get("sourceUrls", []),
+        # How much research the dossier needs depends on the length of the script it has to carry:
+        # ContentPipe scales its key-fact target off this, and reports the shortfall in researchGaps
+        # rather than padding. Omitting it would let a 9-minute documentary settle for four facts.
+        "targetDurationSec": payload.get("targetDurationSec", DEFAULT_TARGET_DURATION_SEC),
     }
     # channelName is where the story came from (a Telegram feed, a wire) and goes into the research prompt as
     # its origin. Our own channel is not an origin, so it is only forwarded when the job names a real one.
