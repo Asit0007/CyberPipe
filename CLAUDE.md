@@ -56,18 +56,62 @@ stages 1-3 to have something to call.
 
 `PENDING → RUNNING → {SCHEDULED | NEEDS_INPUT | COMPLETED | FAILED}`
 
-- **SCHEDULED**: either rate-limited (retry per `rate_limiter.py`: `Retry-After`
-  header → provider daily reset → 24h default) or a generic error under
-  backoff (`config.BACKOFF_SCHEDULE_SECONDS`: 5m/15m/45m/2h/6h,
-  `config.MAX_STAGE_ATTEMPTS` before FAILED).
+Every status change is a conditional write — `db.claim_job` (PENDING or due
+SCHEDULED → RUNNING) and `db.transition(id, from_status, ...)` ("only if the row is
+still in the status I read"). That is what lets the scheduler, the Telegram poller
+and the timeout sweep race safely: a stale read can never overwrite newer state.
+
+- **RUNNING** carries a lock (`locked_by` = `host:pid`, `locked_at`). A RUNNING job
+  is orphaned — and `worker.reclaim_orphaned_jobs()` (every tick) re-queues it — if
+  its pid is gone on this host, or its lease (`config.RUNNING_LEASE_SECONDS`, default
+  script timeout + 10 min) expired. The crash counts as an attempt, so a job that
+  keeps killing its worker ends FAILED. Re-running is safe: ContentPipe resumes an
+  interrupted script from its journal, and 409s if the first run is still going.
+- **SCHEDULED**: rate-limited (retry per `rate_limiter.py`: `Retry-After` header →
+  provider daily reset → 24h default), waiting on a busy ContentPipe (409
+  `in_progress`; `StageBusy`), or a generic error under backoff
+  (`config.BACKOFF_SCHEDULE_SECONDS`: 5m/15m/45m/2h/6h, `config.MAX_STAGE_ATTEMPTS`
+  before FAILED). Rate limits and busy-waits consume **no attempt**, but `wait_since`
+  caps an unbroken wait at `config.MAX_WAIT_DAYS` (7) so a stuck job fails instead of
+  retrying forever. `PermanentStageError` (ContentPipe `zero_quota` — needs billing)
+  fails immediately.
 - **NEEDS_INPUT**: only the `script` stage raises this today
   (`pipeline.stage_script`), mirroring the spec's mandatory human checkpoint.
   `job.pending_payload` holds the already-generated draft so approving
-  doesn't recompute it; regenerating clears it and re-runs the stage.
-  `scheduler.py` fails any NEEDS_INPUT job older than
-  `config.NEEDS_INPUT_TIMEOUT_HOURS` (default 72h).
-- Notifications are idempotent via `jobs.notified` (a JSON list of event
-  keys) — see `notifier._notify_once`.
+  doesn't recompute it; regenerating clears it and re-runs the stage. Approve
+  commits the draft and advances in **one** write. The approval message carries the
+  whole draft as `job-<id>-script-draft.md` (`review.py`). `scheduler.py` fails any
+  NEEDS_INPUT job older than `config.NEEDS_INPUT_TIMEOUT_HOURS` (default 72h,
+  measured from the job's last update — a delayed notification restarts the clock).
+- **Notifications** are idempotent via `jobs.notified` (a JSON list of event keys),
+  and an event is recorded **only if Telegram accepted it**. Failed or held
+  (bot not configured yet) events are re-sent by
+  `notifier.resend_missed_notifications()` each tick, throttled per event by
+  `config.TELEGRAM_RESEND_COOLDOWN_SECONDS`. Messages are plain text (no
+  `parse_mode`): titles like "AT&T" or `<script>` broke Telegram's HTML mode.
+  Regenerate clears the `needs_input:` keys so the next draft is announced again.
+
+### Tier 1 audit fixes (2026-09-20)
+
+Found by auditing the (never-yet-run) orchestrator; each has regression tests in
+`tests/`, and each test was checked by re-introducing its bug (mutation check):
+
+| Bug | Was | Guard |
+|---|---|---|
+| SCHEDULED jobs never re-ran | `run_job` accepted only PENDING, so every rate-limited/backed-off job stayed SCHEDULED forever — the core retry promise did not work through the scheduler | `test_worker.SchedulerDispatchTests` |
+| Regenerate went silent | dedupe key `needs_input:script:0` reused for the next draft | `RegenerateTests` |
+| Crash orphaned jobs | killed worker left RUNNING forever; `due_jobs` never returns it | `OrphanReclaimTests` (+ a real `kill -9` run) |
+| Poller poison pill | a 400 from `answerCallbackQuery` (old tap) raised before the offset was saved → same update replayed forever | `test_poller` |
+| Bot token in logs | `requests` puts `/bot<TOKEN>/…` in exception text | `test_poller`, `test_notifier` |
+| Lost notifications | event marked sent when Telegram was unconfigured/down/400 | `test_notifier` |
+| Timeout up to 24h late | ISO `T` vs SQLite `datetime()` space compared as strings | `test_db.StaleNeedsInputTests` |
+| Non-atomic approve, blind approval | draft cleared and stored in two writes; approver saw a summary | `ApprovalTests`, `DraftAttachmentTests` |
+| 409 / zero_quota retried as failures | burned backoff attempts | `test_pipeline_http`, `WaitingStateTests` |
+
+**Still open from that audit:** an *edit/upload revised script* path. The spec says
+"human rewrite is mandatory", but approve still commits the LLM draft as-is (the
+human now at least reads it). Needs a design decision on how a revised script comes
+back (Telegram document reply vs. re-ingest through ContentPipe).
 
 ## What's stubbed vs. built
 
@@ -299,7 +343,10 @@ exists.
 | Pitfall | Detail |
 |---|---|
 | `.env` read once | Same gotcha as ContentPipe — restart `scheduler.py`/`telegram_poller.py` after editing `.env`. |
-| Stale button taps | `worker.resume_from_input` checks `job.status == "NEEDS_INPUT"` before acting, so a tap on an old message for an already-resolved job is a silent no-op, not a crash. |
+| Stale button taps | `worker.resume_from_input` only acts on a job still in NEEDS_INPUT (and the write is conditional on it), so a tap on an old message is a no-op; the poller answers "Already handled". A tap can never double-apply. |
+| Logging Telegram errors | The bot token is in every request URL and `requests` prints the URL in its exceptions. Anything logged from a Telegram call must go through `notifier.redact_secrets`; `telegram_poller._api` raises `TelegramAPIError` `from None` for the same reason. |
+| Writing job status | Use `db.transition(id, from_status, ...)` / `db.claim_job`, not `db.update_job`, for any status change — `update_job` is unconditional and can clobber a newer state. |
+| Timestamps | Store only `db.to_iso(...)` (fixed-width UTC). SQL compares them as strings; `datetime.isoformat()` drops the fraction at `.000000` and SQLite's `datetime()` uses a space, both of which break that. |
 | Strict header | Stages 1-3 rely on `X-ContentPipe-Strict: 1` (in `pipeline.STRICT_HEADERS`). Without it ContentPipe returns canned content with HTTP 200 on quota exhaustion. Don't drop it when refactoring `_post`. |
 | ContentPipe must be running | Stages 1-3 are plain HTTP calls to `CONTENTPIPE_BASE_URL`. If ContentPipe isn't up, every job fails with a connection error and goes through the generic backoff path, not the rate-limit path. |
 | WAL mode + concurrent processes | `scheduler.py` and `telegram_poller.py` both open their own connections via `db.get_connection()`; SQLite WAL handles this fine at this scale. Move to Postgres only if running >5 workers (per the original spec's own threshold — not needed now). |
