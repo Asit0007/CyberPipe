@@ -37,6 +37,18 @@ python3 scheduler.py          # separate terminal — polls every 60s, runs due 
 python3 telegram_poller.py    # separate terminal — only needed once TELEGRAM_* is set
 ```
 
+Two flags on `submit_job.py` are worth telling apart, because they used to be the same
+value and it produced a script that welcomed viewers to a tool:
+
+| Flag | Means | Default |
+|---|---|---|
+| `--brand` | The **show** name written into the script. `--channel-name` is kept as an alias. | `CHANNEL_BRAND_NAME` (see below) |
+| `--source-name` | Where the **story** came from — a Telegram feed, a wire. Goes into the research prompt as its origin. | Omitted. Our own channel is not a story's origin, so nothing is sent unless you name one. |
+
+Also sent to `/api/research`: the target duration. ContentPipe scales how much research it
+asks for off the length of the script it has to carry, so a 9-minute documentary isn't
+researched as though it were a 60-second short.
+
 Every ContentPipe call sends `X-ContentPipe-Strict: 1`, so a quota hit or outage
 comes back as `429`/`503` with `Retry-After` — which becomes a scheduled retry at
 the right time — rather than canned sample content that would look like a real
@@ -76,6 +88,7 @@ sources actually read), so you approve what you've read, not a summary.
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | No | Human-in-the-loop checkpoints and notifications. Without it `scheduler.py` holds notifications until it's set, and `telegram_poller.py` exits immediately. |
 | `TELEGRAM_CHAT_ID` | No | Only this chat is authorized to resume a job. |
+| `CHANNEL_BRAND_NAME` | No | The show name ContentPipe writes into scripts when a job doesn't carry its own. Defaults to `Blast Radius`, matching ContentPipe's `DEFAULT_CHANNEL_BRAND`. Never set this to the name of this tool — it ends up spoken on camera. |
 | `CONTENTPIPE_BASE_URL` | No | Defaults to `http://localhost:3000`. |
 | `CONTENTPIPE_TIMEOUT_SECONDS` | No | Per-request timeout for research/plan, defaults to 180. |
 | `CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS` | No | Defaults to 1800 (30 min) — `/api/script` makes many sequential Gemini calls internally for a long-form script. |
@@ -101,9 +114,10 @@ its own temporary SQLite file:
 ./venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
-They cover the job state machine (retry dispatch, crash recovery, regenerate/approve,
-timeouts), Telegram delivery and the poller, and how ContentPipe's status codes map onto
-worker behaviour. See `CLAUDE.md` "Tier 1 audit fixes" for what each guards against.
+99 tests covering the job state machine (retry dispatch, crash recovery, regenerate/approve,
+timeouts), Telegram delivery and the poller, how ContentPipe's status codes map onto worker
+behaviour, and what the request bodies sent to ContentPipe actually contain. See `CLAUDE.md`
+"Tier 1 audit fixes" for what each guards against.
 
 ---
 
@@ -111,7 +125,7 @@ worker behaviour. See `CLAUDE.md` "Tier 1 audit fixes" for what each guards agai
 
 | Stage | Status |
 |---|---|
-| 1. Research | Built — calls ContentPipe `/api/research` |
+| 1. Research | Built — calls ContentPipe `/api/research`, forwarding the target duration so the dossier is researched to the depth the script needs |
 | 2. Plan | Built — calls ContentPipe `/api/plan`, including target video duration |
 | 3. Script | Built — calls ContentPipe `/api/script`, mandatory Telegram approve/regenerate checkpoint; the approval message includes ContentPipe's audit findings (runtime shortfall, unsourced figures, mid-roll eligibility) and attaches the full draft |
 | Edit / upload a revised script | Not built — approve still commits the LLM draft as-is; the spec's "human rewrite is mandatory" needs a decision on how a revised script comes back |
