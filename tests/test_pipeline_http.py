@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import pipeline
-from exceptions import PermanentStageError, RateLimitError, StageBusy
+from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy
 from tests.support import FakeResponse
 
 
@@ -69,3 +69,55 @@ class PostContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BrandDefaultTests(unittest.TestCase):
+    """The show name in a script is the channel's, never the tool's, and our own channel is not a story's origin."""
+
+    def stage(self, fn, payload, outputs=None):
+        job = {"input_payload": payload}
+        with mock.patch("pipeline._post", return_value={"scenes": [], "title": "t"}) as m:
+            try:
+                fn(job, outputs if outputs is not None else {"research": {}, "plan": {}})
+            except HumanInputRequired:
+                pass  # stage_script always ends at its approval checkpoint; the request body is what's under test
+        return m.call_args.args[1]
+
+    def test_script_brand_defaults_to_the_channel_not_the_tool(self):
+        body = self.stage(pipeline.stage_script, {"messageText": "x"})
+        self.assertEqual(body["channelBrandName"], "Blast Radius")
+        self.assertNotIn("CyberPipe", body["channelBrandName"])
+
+    def test_script_brand_follows_config_and_an_explicit_job_brand_wins(self):
+        with mock.patch("pipeline.config.CHANNEL_BRAND_NAME", "Some Other Show"):
+            self.assertEqual(self.stage(pipeline.stage_script, {"messageText": "x"})["channelBrandName"], "Some Other Show")
+        self.assertEqual(self.stage(pipeline.stage_script, {"messageText": "x", "channelBrandName": "Job Show"})["channelBrandName"], "Job Show")
+
+    def test_an_empty_brand_falls_back_rather_than_reaching_the_script(self):
+        self.assertEqual(self.stage(pipeline.stage_script, {"messageText": "x", "channelBrandName": ""})["channelBrandName"], "Blast Radius")
+
+    def test_research_gets_no_invented_source_channel(self):
+        self.assertNotIn("channelName", self.stage(pipeline.stage_research, {"messageText": "x"}, outputs={}))
+
+    def test_research_forwards_a_real_source_channel(self):
+        self.assertEqual(self.stage(pipeline.stage_research, {"messageText": "x", "channelName": "r/netsec"}, outputs={})["channelName"], "r/netsec")
+
+
+class SubmitJobBrandTests(unittest.TestCase):
+    def submitted(self, *argv):
+        import submit_job
+
+        with mock.patch("sys.argv", ["submit_job.py", "--text", "story", *argv]), mock.patch("submit_job.db") as db:
+            db.create_job.return_value = 1
+            submit_job.main()
+        return db.create_job.call_args.kwargs["input_payload"]
+
+    def test_default_brand_is_the_channel_and_no_source_is_invented(self):
+        payload = self.submitted()
+        self.assertEqual(payload["channelBrandName"], "Blast Radius")
+        self.assertNotIn("channelName", payload)
+
+    def test_brand_and_source_are_separate_flags_and_the_old_flag_still_sets_the_brand(self):
+        payload = self.submitted("--brand", "X Show", "--source-name", "r/netsec")
+        self.assertEqual((payload["channelBrandName"], payload["channelName"]), ("X Show", "r/netsec"))
+        self.assertEqual(self.submitted("--channel-name", "Legacy")["channelBrandName"], "Legacy")

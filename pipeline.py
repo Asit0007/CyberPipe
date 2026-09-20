@@ -237,9 +237,12 @@ def stage_research(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, An
     payload = job["input_payload"]
     body = {
         "messageText": payload["messageText"],
-        "channelName": payload.get("channelName", "CyberPipe"),
         "sourceUrls": payload.get("sourceUrls", []),
     }
+    # channelName is where the story came from (a Telegram feed, a wire) and goes into the research prompt as
+    # its origin. Our own channel is not an origin, so it is only forwarded when the job names a real one.
+    if payload.get("channelName"):
+        body["channelName"] = payload["channelName"]
     research = _post("/api/research", body, provider="contentpipe:research")
     research["cyberpipe_extracted"] = {"cveIds": _extract_cve_ids(research)}
     return research
@@ -261,7 +264,7 @@ def stage_script(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]
     body = {
         "videoPlan": outputs["plan"],
         "researchData": _reframe_research_for_forwarding(outputs["research"]),
-        "channelBrandName": payload.get("channelBrandName", "CyberPipe"),
+        "channelBrandName": payload.get("channelBrandName") or config.CHANNEL_BRAND_NAME,
     }
     draft = _post("/api/script", body, provider="contentpipe:script", timeout=config.CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS)
     draft["cyberpipe_midroll_markers"] = _server_midroll_markers(draft) or _compute_midroll_markers(draft.get("scenes") or [])

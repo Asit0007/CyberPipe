@@ -91,6 +91,10 @@ and the timeout sweep race safely: a stale read can never overwrite newer state.
   `parse_mode`): titles like "AT&T" or `<script>` broke Telegram's HTML mode.
   Regenerate clears the `needs_input:` keys so the next draft is announced again.
 
+### Channel brand
+
+The show name ContentPipe writes into scripts is `config.CHANNEL_BRAND_NAME` (env `CHANNEL_BRAND_NAME`, default "Blast Radius") unless a job's `channelBrandName` overrides it — it must never be the tool's name ("CyberPipe"). `channelName` is a different thing: the story's *origin* (a Telegram feed, a wire), which ContentPipe puts in the research prompt. It is only forwarded when a job names a real one (`submit_job.py --source-name`); our own channel is not an origin. `--channel-name` is kept as an alias of `--brand`.
+
 ### Tier 1 audit fixes (2026-09-20)
 
 Found by auditing the (never-yet-run) orchestrator; each has regression tests in

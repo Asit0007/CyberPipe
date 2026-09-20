@@ -30,6 +30,11 @@ _load_dotenv(BASE_DIR / ".env")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
+# --- Channel ------------------------------------------------------------------
+# The show name ContentPipe writes into scripts ("Welcome back to ...", the publish package) when a job does
+# not carry its own. This is the brand, not the tool: it must never default to "CyberPipe".
+CHANNEL_BRAND_NAME = os.environ.get("CHANNEL_BRAND_NAME", "Blast Radius")
+
 # --- ContentPipe (stages 1-3 call its API rather than reimplementing it) ---
 CONTENTPIPE_BASE_URL = os.environ.get("CONTENTPIPE_BASE_URL", "http://localhost:3000")
 CONTENTPIPE_TIMEOUT_SECONDS = int(os.environ.get("CONTENTPIPE_TIMEOUT_SECONDS", "180"))
