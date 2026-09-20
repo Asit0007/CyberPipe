@@ -63,3 +63,16 @@ DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 24 * 3600
 # which already does its own Gemini fallback/backoff internally, so a 429
 # surfacing here just means ContentPipe itself is exhausted or down.
 PROVIDER_DAILY_RESET_UTC: dict[str, str] = {}
+
+# A job stuck waiting on something external (rate limit, ContentPipe busy) gives up after this
+# many days rather than retrying forever. Per-minute limits clear in seconds; a daily quota
+# clears at midnight Pacific; seven days of either means something is actually wrong.
+MAX_WAIT_DAYS = int(os.environ.get("MAX_WAIT_DAYS", "7"))
+
+# A RUNNING job whose lease is older than this is treated as orphaned even if its recorded
+# pid looks alive (pid reuse after a reboot; a lock written by another machine). It must
+# exceed the longest legitimate stage: /api/script's own client timeout, plus slack.
+RUNNING_LEASE_SECONDS = int(os.environ.get("RUNNING_LEASE_SECONDS", str(CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS + 600)))
+
+# After a Telegram delivery fails, don't retry that same event more often than this.
+TELEGRAM_RESEND_COOLDOWN_SECONDS = int(os.environ.get("TELEGRAM_RESEND_COOLDOWN_SECONDS", "300"))

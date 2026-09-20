@@ -37,3 +37,21 @@ class HumanInputRequired(Exception):
         self.options = options
         self.payload = payload or {}
         super().__init__(question)
+
+
+class StageBusy(Exception):
+    """Raise when the stage's work is already in flight elsewhere (ContentPipe answered 409
+    `in_progress`: an identical /api/script run is still generating).
+
+    Not a failure and not a rate limit: worker.py reschedules the job for `retry_at` without
+    consuming an attempt and without paging anyone.
+    """
+
+    def __init__(self, message: str, retry_at: Optional[datetime] = None):
+        self.retry_at = retry_at
+        super().__init__(message)
+
+
+class PermanentStageError(Exception):
+    """Raise when retrying can never help (e.g. ContentPipe's `zero_quota`: the key has no quota
+    and needs billing). worker.py fails the job immediately instead of burning every backoff attempt."""

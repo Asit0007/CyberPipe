@@ -46,13 +46,14 @@ that's the record of why it was needed):
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
 
 import config
 import rate_limiter
-from exceptions import HumanInputRequired, RateLimitError
+from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy
 
 PIPELINE_STAGES = ["research", "plan", "script"]
 
@@ -94,6 +95,19 @@ def next_stage_after(stage: str) -> str | None:
 STRICT_HEADERS = {"X-ContentPipe-Strict": "1"}
 
 
+# Retry-After is absent on a 409 from an older ContentPipe; matches worker.DEFAULT_BUSY_WAIT_SECONDS.
+DEFAULT_BUSY_WAIT_SECONDS = 30
+
+
+def _error_body(resp: Any) -> dict[str, Any]:
+    """ContentPipe's structured error body ({error, kind, retryable, ...}), or {} if it isn't JSON."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 def _post(path: str, body: dict[str, Any], provider: str, timeout: int | None = None) -> dict[str, Any]:
     url = f"{config.CONTENTPIPE_BASE_URL}{path}"
     try:
@@ -108,7 +122,19 @@ def _post(path: str, body: dict[str, Any], provider: str, timeout: int | None = 
             retry_at=rate_limiter.parse_retry_after(resp.headers.get("Retry-After")),
             message=f"{path} returned 429: {resp.text[:300]}",
         )
+    if resp.status_code == 409:
+        # ContentPipe is still generating this exact run (a client timeout doesn't stop the server).
+        # Not a failure: wait for it, and don't spend a backoff attempt.
+        raise StageBusy(
+            f"{path} run is already in progress on ContentPipe",
+            retry_at=rate_limiter.parse_retry_after(resp.headers.get("Retry-After"))
+            or datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_BUSY_WAIT_SECONDS),
+        )
     if not resp.ok:
+        body = _error_body(resp)
+        if resp.status_code == 502 and body.get("kind") == "zero_quota":
+            # The key has no quota at all (billing needed). No amount of waiting fixes that.
+            raise PermanentStageError(f"{path}: {body.get('error') or 'no quota exists for this API key'} — enable billing")
         raise RuntimeError(f"{path} returned {resp.status_code}: {resp.text[:500]}")
     data = resp.json()
     # Belt and braces for an older ContentPipe that ignores the header.

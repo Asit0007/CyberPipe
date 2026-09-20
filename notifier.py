@@ -1,82 +1,171 @@
-"""One-way Telegram notifications: completion, input-required, rate-limited,
-failed. Idempotent per job via db.already_notified()/mark_notified() — each
-event key is sent at most once per job.
+"""Telegram notifications: completion, input-required, rate-limited, failed.
+Idempotent per job via db.already_notified()/mark_notified() — each event key is
+sent at most once per job.
 
-No-ops with a warning if TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID aren't set yet,
-so the rest of the orchestrator is runnable before Telegram is wired up.
+"Notified" means Telegram *accepted* the message. An event that failed to send
+(Telegram down, bot not configured yet, a rejected request) is not recorded, and
+resend_missed_notifications() — called every scheduler tick — delivers it later.
+Recording it anyway would silently lose an approval request the human is waiting on.
+
+Messages are plain text on purpose. They carry story titles and error text ("AT&T",
+"<script>"), and Telegram's HTML mode answers 400 to any unescaped `<` or `&`.
 """
 from __future__ import annotations
 
+import re
+import time
 from typing import Any, Optional
 
 import requests
 
 import config
 import db
+import review
 
 API_BASE = "https://api.telegram.org"
+MAX_TEXT_CHARS = 4096      # Telegram's sendMessage limit
+MAX_CAPTION_CHARS = 1024   # ... and sendDocument's caption limit
+
+_monotonic = time.monotonic
+_last_failure: dict[tuple[int, str], float] = {}
+_warned_unconfigured = False
+
+_BOT_URL_TOKEN = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 
 
-def _configured() -> bool:
-    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
-        print("[notifier] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — skipping notification")
+def reset_state_for_tests() -> None:
+    """Test hook: module-level throttling state must not leak between tests."""
+    global _monotonic, _warned_unconfigured
+    _monotonic = time.monotonic
+    _warned_unconfigured = False
+    _last_failure.clear()
+
+
+def redact_secrets(text: str) -> str:
+    """Mask the bot token. `requests` puts the request URL — /bot<TOKEN>/method — in its exception
+    text, and error bodies can echo it, so anything logged from a Telegram call goes through here."""
+    text = _BOT_URL_TOKEN.sub("bot<redacted>", text)
+    token = config.TELEGRAM_BOT_TOKEN
+    if token:
+        text = text.replace(token, "<redacted>")
+        secret = token.partition(":")[2]
+        if secret:
+            text = text.replace(secret, "<redacted>")
+    return text
+
+
+def _configured(*, quiet: bool = False) -> bool:
+    global _warned_unconfigured
+    if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
+        return True
+    if not quiet and not _warned_unconfigured:
+        # Once per process, not once per tick: events are held and sent when this is configured.
+        print("[notifier] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — notifications are held until they are")
+        _warned_unconfigured = True
+    return False
+
+
+def _call(method: str, **request_kwargs: Any) -> bool:
+    """One Telegram API call. True only if Telegram accepted it."""
+    url = f"{API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/{method}"
+    try:
+        resp = requests.post(url, timeout=30 if "files" in request_kwargs else 10, **request_kwargs)
+    except requests.RequestException as exc:
+        print(f"[notifier] Telegram {method} failed: {redact_secrets(str(exc))}")
+        return False
+    if not resp.ok:
+        print(f"[notifier] Telegram {method} rejected: {resp.status_code} {redact_secrets(resp.text)[:300]}")
         return False
     return True
 
 
-def send_message(text: str, reply_markup: Optional[dict[str, Any]] = None) -> None:
+def send_message(text: str, reply_markup: Optional[dict[str, Any]] = None) -> bool:
     if not _configured():
-        return
-    url = f"{API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload: dict[str, Any] = {
-        "chat_id": config.TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-    }
+        return False
+    if len(text) > MAX_TEXT_CHARS:
+        text = text[: MAX_TEXT_CHARS - 1] + "…"
+    payload: dict[str, Any] = {"chat_id": config.TELEGRAM_CHAT_ID, "text": text}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if not resp.ok:
-            print(f"[notifier] Telegram send failed: {resp.status_code} {resp.text}")
-    except requests.RequestException as exc:
-        print(f"[notifier] Telegram send raised: {exc}")
+    return _call("sendMessage", json=payload)
 
 
-def _notify_once(job_id: int, event_key: str, text: str, reply_markup: Optional[dict[str, Any]] = None) -> None:
+def send_document(filename: str, content: bytes, caption: Optional[str] = None) -> bool:
+    if not _configured():
+        return False
+    data: dict[str, Any] = {"chat_id": config.TELEGRAM_CHAT_ID}
+    if caption:
+        data["caption"] = caption[:MAX_CAPTION_CHARS]
+    return _call("sendDocument", data=data, files={"document": (filename, content, "text/markdown")})
+
+
+def _notify_once(
+    job_id: int,
+    event_key: str,
+    text: str,
+    reply_markup: Optional[dict[str, Any]] = None,
+    document: Optional[tuple[str, bytes]] = None,
+) -> bool:
+    """Send at most once per (job, event). True if this call delivered it."""
     job = db.get_job(job_id)
     if job is None or db.already_notified(job, event_key):
-        return
-    send_message(text, reply_markup)
+        return False
+    failed_at = _last_failure.get((job_id, event_key))
+    if failed_at is not None and _monotonic() - failed_at < config.TELEGRAM_RESEND_COOLDOWN_SECONDS:
+        return False
+    if not _configured():
+        return False
+
+    if document is not None and not send_document(*document, caption=f"Job #{job_id} — full draft"):
+        # Don't hold the approval back for it, but never let the human approve unaware.
+        text += f"\n⚠️ The draft could not be attached to this message. Read job #{job_id}'s pending_payload before approving."
+    if not send_message(text, reply_markup):
+        _last_failure[(job_id, event_key)] = _monotonic()
+        return False
+    _last_failure.pop((job_id, event_key), None)
     db.mark_notified(job_id, event_key)
+    return True
 
 
-def notify_input_required(job: dict[str, Any]) -> None:
-    question = job["pending_question"].get("question", "Approval needed")
-    options = job["pending_question"].get("options", ["approve", "regenerate"])
+def notify_input_required(job: dict[str, Any]) -> bool:
+    pending = job.get("pending_question") or {}
+    question = pending.get("question", "Approval needed")
+    options = pending.get("options", ["approve", "regenerate"])
     keyboard = {
         "inline_keyboard": [[
             {"text": opt.capitalize(), "callback_data": f"job:{job['id']}:{opt}"} for opt in options
         ]]
     }
     text = f"🟡 Job #{job['id']} needs input (stage: {job['current_stage']})\n{question}"
-    _notify_once(job["id"], f"needs_input:{job['current_stage']}:{job['attempt_count']}", text, keyboard)
+    draft = review.render_review_markdown(job)
+    document = (f"job-{job['id']}-script-draft.md", draft.encode("utf-8")) if draft else None
+    return _notify_once(job["id"], f"needs_input:{job['current_stage']}:{job['attempt_count']}", text, keyboard, document)
 
 
-def notify_rate_limited(job: dict[str, Any], provider: str, retry_at_iso: str) -> None:
+def notify_rate_limited(job: dict[str, Any], provider: str, retry_at_iso: str) -> bool:
     text = (
         f"⏳ Job #{job['id']} rate limited (stage: {job['current_stage']}, provider: {provider})\n"
         f"Retrying at {retry_at_iso}"
     )
-    _notify_once(job["id"], f"rate_limited:{job['current_stage']}:{retry_at_iso}", text)
+    return _notify_once(job["id"], f"rate_limited:{job['current_stage']}:{retry_at_iso}", text)
 
 
-def notify_completed(job: dict[str, Any]) -> None:
-    text = f"✅ Job #{job['id']} completed."
-    _notify_once(job["id"], "completed", text)
+def notify_completed(job: dict[str, Any]) -> bool:
+    return _notify_once(job["id"], "completed", f"✅ Job #{job['id']} completed.")
 
 
-def notify_failed(job: dict[str, Any]) -> None:
+def notify_failed(job: dict[str, Any]) -> bool:
     error_excerpt = (job.get("last_error") or "")[:300]
     text = f"❌ Job #{job['id']} failed (stage: {job['current_stage']})\n{error_excerpt}"
-    _notify_once(job["id"], f"failed:{job['current_stage']}:{job['attempt_count']}", text)
+    return _notify_once(job["id"], f"failed:{job['current_stage']}:{job['attempt_count']}", text)
+
+
+def resend_missed_notifications() -> int:
+    """Deliver messages that never got through: a job waiting on a human whose approval request was
+    lost, or a finished job whose completion/failure message was. Idempotent — an event already
+    delivered is skipped — and throttled per event after a failed attempt. Returns how many were sent.
+    """
+    if not _configured(quiet=True):
+        return 0
+    handlers = {"NEEDS_INPUT": notify_input_required, "COMPLETED": notify_completed, "FAILED": notify_failed}
+    return sum(1 for job in db.jobs_with_status(tuple(handlers)) if handlers[job["status"]](job))

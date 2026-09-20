@@ -5,6 +5,14 @@ prototype only handles those callback buttons — the slash-command dashboard
 yet.
 
 Only TELEGRAM_CHAT_ID is authorized; every other chat is logged and ignored.
+
+Robustness rules (each has a regression test in tests/test_poller.py):
+* An update is *consumed* whether or not handling it succeeds. Leaving the offset
+  unsaved on an error replays that update forever and blocks every later tap.
+* Acknowledging a tap (answerCallbackQuery) is best-effort: Telegram rejects it once
+  the tap is old (e.g. the Mac was asleep), and the tap itself is already applied.
+* The bot token lives in every request URL, and `requests` puts the URL in its
+  exception text — so nothing from an API call is logged without redaction.
 """
 from __future__ import annotations
 
@@ -15,18 +23,38 @@ import requests
 
 import config
 import db
+import notifier
 import worker
 
 API_BASE = "https://api.telegram.org"
 LONG_POLL_TIMEOUT_SECONDS = 30
 OFFSET_KV_KEY = "telegram_update_offset"
+ERROR_PAUSE_SECONDS = 5
+
+
+class TelegramAPIError(RuntimeError):
+    """A failed Telegram API call, with the bot token already scrubbed from the message."""
 
 
 def _api(method: str, **params: Any) -> dict[str, Any]:
     url = f"{API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/{method}"
-    resp = requests.post(url, json=params, timeout=LONG_POLL_TIMEOUT_SECONDS + 10)
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        resp = requests.post(url, json=params, timeout=LONG_POLL_TIMEOUT_SECONDS + 10)
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        # `from None`: the chained original would print the token-bearing URL in any traceback.
+        raise TelegramAPIError(f"{method} failed: {notifier.redact_secrets(str(exc))}") from None
+
+
+def _answer(callback_query_id: str, text: Optional[str] = None) -> None:
+    params: dict[str, Any] = {"callback_query_id": callback_query_id}
+    if text:
+        params["text"] = text
+    try:
+        _api("answerCallbackQuery", **params)
+    except TelegramAPIError as exc:
+        print(f"[telegram_poller] could not acknowledge tap: {exc}")
 
 
 def _is_authorized(from_user: dict[str, Any]) -> bool:
@@ -34,28 +62,38 @@ def _is_authorized(from_user: dict[str, Any]) -> bool:
 
 
 def _handle_callback_query(callback_query: dict[str, Any]) -> None:
+    query_id = callback_query["id"]
     from_user = callback_query.get("from", {})
-    data = callback_query.get("data", "")
     if not _is_authorized(from_user):
         print(f"[telegram_poller] ignoring callback from unauthorized chat {from_user.get('id')}")
-        _api("answerCallbackQuery", callback_query_id=callback_query["id"], text="Unauthorized")
+        _answer(query_id, "Unauthorized")
         return
 
-    parts = data.split(":")
+    parts = callback_query.get("data", "").split(":")
     if len(parts) != 3 or parts[0] != "job":
-        _api("answerCallbackQuery", callback_query_id=callback_query["id"])
+        _answer(query_id)
         return
 
     _, job_id_str, answer = parts
     try:
         job_id = int(job_id_str)
     except ValueError:
-        _api("answerCallbackQuery", callback_query_id=callback_query["id"], text="Bad job id")
+        _answer(query_id, "Bad job id")
         return
 
-    worker.resume_from_input(job_id, answer)
-    _api("answerCallbackQuery", callback_query_id=callback_query["id"], text=f"Recorded: {answer}")
-    print(f"[telegram_poller] job #{job_id} resumed with answer={answer!r}")
+    try:
+        applied = worker.resume_from_input(job_id, answer)
+    except Exception as exc:  # noqa: BLE001 — tell the human to tap again rather than wedge the queue
+        print(f"[telegram_poller] job #{job_id}: resuming with {answer!r} raised: {notifier.redact_secrets(str(exc))}")
+        _answer(query_id, "Something went wrong — please tap again")
+        return
+
+    if applied:
+        _answer(query_id, f"Recorded: {answer}")
+        print(f"[telegram_poller] job #{job_id} resumed with answer={answer!r}")
+    else:
+        _answer(query_id, "Already handled")
+        print(f"[telegram_poller] job #{job_id}: {answer!r} ignored (already handled, or nothing to apply)")
 
 
 def _process_update(update: dict[str, Any]) -> None:
@@ -79,9 +117,11 @@ def poll_once() -> None:
     if offset is not None:
         params["offset"] = offset
     result = _api("getUpdates", **params)
-    updates = result.get("result", [])
-    for update in updates:
-        _process_update(update)
+    for update in result.get("result", []):
+        try:
+            _process_update(update)
+        except Exception as exc:  # noqa: BLE001 — a poison update must be skipped, not replayed forever
+            print(f"[telegram_poller] update {update.get('update_id')} skipped after error: {notifier.redact_secrets(str(exc))}")
         _set_offset(update["update_id"] + 1)
 
 
@@ -94,11 +134,9 @@ def main() -> None:
     while True:
         try:
             poll_once()
-        except requests.RequestException as exc:
-            print(f"[telegram_poller] getUpdates failed: {exc}")
-            time.sleep(5)
-        except Exception as exc:  # noqa: BLE001 — the loop must survive a single bad update
-            print(f"[telegram_poller] update handling raised: {exc}")
+        except Exception as exc:  # noqa: BLE001 — the loop must survive anything, and must not spin
+            print(f"[telegram_poller] poll failed: {notifier.redact_secrets(str(exc))}")
+            time.sleep(ERROR_PAUSE_SECONDS)
 
 
 if __name__ == "__main__":
