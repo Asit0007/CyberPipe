@@ -20,7 +20,7 @@ import config
 import db
 import notifier
 import rate_limiter
-from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy
+from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, UpstreamUnavailable
 from pipeline import STAGE_FUNCTIONS, next_stage_after
 
 # Where a job goes when ContentPipe says the identical run is still in flight and gives no Retry-After.
@@ -97,6 +97,16 @@ def run_job(job_id: int) -> None:
         _wait(job, retry_at, f"stage busy: {exc}")  # no attempt consumed, nobody paged
         return
 
+    except UpstreamUnavailable as exc:
+        retry_at = _overload_retry_at(job, exc.retry_at)
+        db.log_stage_run(job_id, stage, attempt, "unavailable", started_at, db.now_iso(), provider=exc.provider, error=str(exc))
+        if _wait(job, retry_at, f"upstream unavailable: {exc}"):
+            since = _parse_iso(job.get("wait_since"))
+            waited = (datetime.now(timezone.utc) - since).total_seconds() if since else 0.0
+            if waited >= notifier.LONG_WAIT_SECONDS:  # a blip that clears in a minute is not worth a page
+                notify_safely(lambda j: notifier.notify_upstream_unavailable(j, waited), job_id)
+        return
+
     except HumanInputRequired as exc:
         db.log_stage_run(job_id, stage, attempt, "success", started_at, db.now_iso())
         db.transition(
@@ -141,6 +151,16 @@ def _wait(job: dict[str, Any], retry_at: datetime, reason: str) -> bool:
     db.transition(job["id"], "RUNNING", status="SCHEDULED", next_retry_at=db.to_iso(retry_at),
                   last_error=reason, wait_since=db.to_iso(since), **UNLOCK)
     return True
+
+
+def _overload_retry_at(job: dict[str, Any], hinted: Optional[datetime]) -> datetime:
+    """When to re-poll a ContentPipe that reported its providers overloaded. Starts at its own
+    Retry-After (30 s) and stretches to half the outage's age, capped at OVERLOAD_MAX_WAIT_SECONDS:
+    quick to notice recovery, quiet through a long one. Never earlier than what ContentPipe asked."""
+    now = datetime.now(timezone.utc)
+    since = _parse_iso(job.get("wait_since")) or now
+    grown = now + timedelta(seconds=min((now - since).total_seconds() / 2, config.OVERLOAD_MAX_WAIT_SECONDS))
+    return max(hinted or now + timedelta(seconds=DEFAULT_BUSY_WAIT_SECONDS), grown)
 
 
 def _fail(job_id: int, attempt: int, error: str) -> None:

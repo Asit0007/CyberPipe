@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     job_id       INTEGER NOT NULL REFERENCES jobs(id),
     stage        TEXT NOT NULL,
     attempt      INTEGER NOT NULL,
-    status       TEXT NOT NULL,   -- success | error | rate_limited | busy
+    status       TEXT NOT NULL,   -- success | error | rate_limited | busy | unavailable
     provider     TEXT,
     duration_ms  INTEGER,
     error        TEXT,

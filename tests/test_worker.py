@@ -14,7 +14,7 @@ import db
 import notifier
 import scheduler
 import worker
-from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy
+from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, UpstreamUnavailable
 from tests.support import DbTestCase
 
 THIS_HOST = socket.gethostname()
@@ -226,6 +226,85 @@ class RateLimitNotificationTests(DbTestCase):
         db.update_job(job_id, wait_since=None)  # what a successful stage does
         self.limited_run(job_id, timedelta(seconds=60))
         self.assertEqual(len(self.rate_limit_messages()), 2)
+
+
+class UpstreamUnavailableTests(DbTestCase):
+    """ContentPipe's 503: its model providers are all overloaded. A wait, not a failure: no attempt is spent,
+    the retry stretches as the outage lasts, and the human hears about it once, not every minute."""
+
+    def run_once(self, job_id: int, hint: timedelta | None = timedelta(seconds=30)):
+        self.set_raw(job_id, next_retry_at=self.ago(seconds=1))  # due again
+        retry_at = datetime.now(timezone.utc) + hint if hint is not None else None
+        stage = mock.Mock(side_effect=UpstreamUnavailable("contentpipe:script", retry_at=retry_at, message="503"))
+        with mock.patch.dict(worker.STAGE_FUNCTIONS, {"script": stage}):
+            worker.run_job(job_id)
+
+    def seconds_until_retry(self, job_id: int) -> float:
+        return (datetime.fromisoformat(db.get_job(job_id)["next_retry_at"]) - datetime.now(timezone.utc)).total_seconds()
+
+    def unavailable_messages(self) -> list[str]:
+        return [m["text"] for m in self.telegram.messages if "overloaded or unreachable" in m["text"]]
+
+    def test_an_outage_never_spends_an_attempt_or_fails_the_job(self):
+        """Five 503s used to exhaust MAX_STAGE_ATTEMPTS and FAIL the job, ignoring the 30 s Retry-After."""
+        job_id = self.make_job("script")
+        for _ in range(config.MAX_STAGE_ATTEMPTS + 2):
+            self.run_once(job_id)
+        job = db.get_job(job_id)
+        self.assertEqual((job["status"], job["attempt_count"]), ("SCHEDULED", 0))
+        self.assertIsNotNone(job["wait_since"])
+
+    def test_the_first_retry_follows_contentpipes_hint(self):
+        job_id = self.make_job("script")
+        self.run_once(job_id)
+        self.assertAlmostEqual(self.seconds_until_retry(job_id), 30, delta=5)
+
+    def test_the_wait_stretches_with_the_outage_and_is_capped(self):
+        ten_min = self.make_job("script", wait_since=self.ago(minutes=10))
+        self.run_once(ten_min)
+        self.assertAlmostEqual(self.seconds_until_retry(ten_min), 300, delta=10)  # half the outage's age
+        two_hours = self.make_job("script", wait_since=self.ago(hours=2))
+        self.run_once(two_hours)
+        self.assertAlmostEqual(self.seconds_until_retry(two_hours), config.OVERLOAD_MAX_WAIT_SECONDS, delta=10)
+
+    def test_it_never_retries_sooner_than_contentpipe_asked(self):
+        job_id = self.make_job("script", wait_since=self.ago(minutes=10))
+        self.run_once(job_id, hint=timedelta(hours=1))
+        self.assertAlmostEqual(self.seconds_until_retry(job_id), 3600, delta=10)
+
+    def test_a_short_blip_pages_nobody(self):
+        job_id = self.make_job("script")
+        for _ in range(3):
+            self.run_once(job_id)
+        self.assertEqual(self.unavailable_messages(), [])
+
+    def test_a_long_outage_pages_once(self):
+        job_id = self.make_job("script", wait_since=self.ago(minutes=20))
+        for _ in range(4):
+            self.run_once(job_id)
+        self.assertEqual(len(self.unavailable_messages()), 1)
+        self.assertIn("20 min", self.unavailable_messages()[0])
+
+    def test_a_separate_outage_after_progress_is_announced_again(self):
+        job_id = self.make_job("script", wait_since=self.ago(minutes=20))
+        self.run_once(job_id)
+        db.update_job(job_id, wait_since=self.ago(minutes=30))  # a new, later wait (progress reset the clock in between)
+        self.run_once(job_id)
+        self.assertEqual(len(self.unavailable_messages()), 2)
+
+    def test_the_run_is_logged_as_unavailable_not_as_an_error(self):
+        job_id = self.make_job("script")
+        self.run_once(job_id)
+        with db.get_connection() as conn:
+            statuses = [r[0] for r in conn.execute("SELECT status FROM stage_runs WHERE job_id = ?", (job_id,))]
+        self.assertEqual(statuses, ["unavailable"])
+
+    def test_it_still_gives_up_after_the_wait_cap(self):
+        job_id = self.make_job("script", wait_since=self.ago(days=config.MAX_WAIT_DAYS + 1))
+        self.run_once(job_id)
+        job = db.get_job(job_id)
+        self.assertEqual(job["status"], "FAILED")
+        self.assertIn("waiting", job["last_error"].lower())
 
 
 class OrphanReclaimTests(DbTestCase):

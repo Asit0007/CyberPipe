@@ -8,8 +8,9 @@ and the goal so far has been proving the durability + human-in-the-loop core.
 
 Contract (cyberpipeline-prompts.md Prompt 4):
     def stage_x(job: dict, outputs: dict) -> dict
-Raise RateLimitError / HumanInputRequired instead of returning for those
-cases; let any other exception propagate for worker.py's backoff handling.
+Raise RateLimitError / StageBusy / UpstreamUnavailable / HumanInputRequired
+instead of returning for those cases; let any other exception propagate for
+worker.py's backoff handling.
 
 Integration gaps vs. the original spec, and how they're handled here (see
 CLAUDE.md "Known integration gaps" for the full writeup — this is the fix,
@@ -53,7 +54,7 @@ import requests
 
 import config
 import rate_limiter
-from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy
+from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, UpstreamUnavailable
 
 PIPELINE_STAGES = ["research", "plan", "script"]
 
@@ -133,6 +134,15 @@ def _post(path: str, body: dict[str, Any], provider: str, timeout: int | None = 
             retry_at=rate_limiter.parse_retry_after(resp.headers.get("Retry-After"))
             or datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_BUSY_WAIT_SECONDS),
         )
+    if resp.status_code == 503:
+        # Every model provider behind ContentPipe was overloaded or unreachable, after its own bounded
+        # wait. Not a fault of this job, so it must not spend a backoff attempt: a multi-hour provider
+        # outage used to fail jobs in ~9 h while ignoring the 30 s Retry-After.
+        raise UpstreamUnavailable(
+            provider,
+            retry_at=rate_limiter.parse_retry_after(resp.headers.get("Retry-After")),
+            message=f"{path} returned 503: {resp.text[:300]}",
+        )
     if not resp.ok:
         body = _error_body(resp)
         if resp.status_code == 502 and body.get("kind") == "zero_quota":
@@ -209,6 +219,20 @@ def _server_midroll_markers(draft: dict[str, Any]) -> list[dict[str, Any]]:
     return markers
 
 
+def _midroll_markers_for(draft: dict[str, Any]) -> list[dict[str, Any]]:
+    """Mid-roll placement for the approval document.
+
+    ContentPipe owns this decision. When its response carries `midrollMarkers` at all, an EMPTY
+    list is an answer, not a gap: under 8:00 it places none on purpose and says so in a warning.
+    Falling back to the local guess then invented ~2:30 / ~6:00 markers (one after the last scene of
+    a 5-minute script) and listed them beside ContentPipe's warning that none are eligible. The
+    local computation is only for a ContentPipe too old to send the field.
+    """
+    if isinstance(draft.get("midrollMarkers"), list):
+        return _server_midroll_markers(draft)
+    return _compute_midroll_markers(draft.get("scenes") or [])
+
+
 def _quality_check_notes(draft: dict[str, Any], limit: int = 4) -> list[str]:
     """The worst of ContentPipe's deterministic audit (errors first), one short line each,
     for the approval message. The full list stays on the draft for anyone who wants it."""
@@ -274,7 +298,7 @@ def stage_script(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]
         "channelBrandName": payload.get("channelBrandName") or config.CHANNEL_BRAND_NAME,
     }
     draft = _post("/api/script", body, provider="contentpipe:script", timeout=config.CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS)
-    draft["cyberpipe_midroll_markers"] = _server_midroll_markers(draft) or _compute_midroll_markers(draft.get("scenes") or [])
+    draft["cyberpipe_midroll_markers"] = _midroll_markers_for(draft)
 
     scene_count = len(draft.get("scenes", []))
     total_duration = draft.get("estimatedTotalDuration", 0)

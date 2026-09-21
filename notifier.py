@@ -172,6 +172,18 @@ def notify_rate_limited(job: dict[str, Any], provider: str, retry_at_iso: str) -
     return _notify_once(job["id"], f"rate_limited:{job['current_stage']}:{episode}:{'long' if long_wait else 'short'}", text)
 
 
+def notify_upstream_unavailable(job: dict[str, Any], waited_sec: float) -> bool:
+    """One message per outage (job.wait_since), sent once it has lasted LONG_WAIT_SECONDS. Retries are
+    silent before that, and after it, so a provider outage neither pages every minute nor goes unmentioned."""
+    text = (
+        f"⚠️ Job #{job['id']} has waited {int(waited_sec // 60)} min on ContentPipe (stage: {job['current_stage']}): "
+        f"every model provider it uses is overloaded or unreachable.\n"
+        f"Still retrying, no attempt used. It fails only after {config.MAX_WAIT_DAYS} days of continuous waiting."
+    )
+    episode = job.get("wait_since") or "unknown"
+    return _notify_once(job["id"], f"unavailable:{job['current_stage']}:{episode}", text)
+
+
 def notify_completed(job: dict[str, Any]) -> bool:
     return _notify_once(job["id"], "completed", f"✅ Job #{job['id']} completed.")
 

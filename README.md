@@ -78,7 +78,7 @@ paths work.
 |---|---|
 | ContentPipe returns 429 (quota) | Job is `SCHEDULED` for the `Retry-After` time, no attempt consumed. One ⏳ message per unbroken wait (plus one more if a short wait turns into a long one), not one per retry. Gives up after `MAX_WAIT_DAYS`. |
 | ContentPipe returns 409 (identical script still generating) | Waits and retries quietly — not counted as a failure. |
-| ContentPipe returns 503 (every provider overloaded) | Treated as an ordinary stage error: backoff below, consumes an attempt, ignores `Retry-After`. |
+| ContentPipe returns 503 (every model provider overloaded) | Job is `SCHEDULED` like a rate limit, no attempt consumed: first retry after its `Retry-After`, then a wait of half the outage's age up to `OVERLOAD_MAX_WAIT_SECONDS`. You get one message only if the outage lasts 15 minutes. Gives up after `MAX_WAIT_DAYS`. |
 | ContentPipe returns 502 `zero_quota` (key has no quota) | Fails immediately with a note to enable billing. |
 | Any other stage error | Backoff 5m / 15m / 45m / 2h / 6h, then `FAILED` after `MAX_STAGE_ATTEMPTS`. |
 | Scheduler killed or Mac restarted mid-stage | The job is re-queued on the next tick (counts as an attempt); ContentPipe resumes from its last finished chunk. |
@@ -106,7 +106,8 @@ sources actually read), so you approve what you've read, not a summary.
 | `POLL_INTERVAL_SECONDS` | No | Scheduler tick interval, defaults to 60. |
 | `NEEDS_INPUT_TIMEOUT_HOURS` | No | A job waiting on your tap fails after this long, defaults to 72. |
 | `MAX_STAGE_ATTEMPTS` | No | Ordinary failures before `FAILED`, defaults to 5. |
-| `MAX_WAIT_DAYS` | No | Give up on a job that has been continuously rate-limited or waiting on a busy ContentPipe, defaults to 7. |
+| `MAX_WAIT_DAYS` | No | Give up on a job that has been continuously rate-limited, waiting on a busy ContentPipe, or waiting out a provider outage (503), defaults to 7. |
+| `OVERLOAD_MAX_WAIT_SECONDS` | No | Longest gap between re-polls of a ContentPipe whose providers are overloaded, defaults to 900. |
 | `RUNNING_LEASE_SECONDS` | No | A `RUNNING` job with no live worker is re-queued; this lease must exceed the longest stage. Defaults to the script timeout + 600. |
 | `TELEGRAM_RESEND_COOLDOWN_SECONDS` | No | Minimum gap before re-trying a Telegram message that failed to send, defaults to 300. |
 
@@ -124,7 +125,7 @@ its own temporary SQLite file:
 ./venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
-102 tests covering the job state machine (retry dispatch, crash recovery, regenerate/approve,
+117 tests covering the job state machine (retry dispatch, crash recovery, regenerate/approve,
 timeouts), Telegram delivery and the poller, how ContentPipe's status codes map onto worker
 behaviour, and what the request bodies sent to ContentPipe actually contain. See `CLAUDE.md`
 "Tier 1 audit fixes" for what each guards against.

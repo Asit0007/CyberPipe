@@ -69,6 +69,11 @@ DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 24 * 3600
 # surfacing here just means ContentPipe itself is exhausted or down.
 PROVIDER_DAILY_RESET_UTC: dict[str, str] = {}
 
+# While ContentPipe's model providers are overloaded (its 503), a job re-polls at most this often once
+# the outage has lasted a while: the wait grows to half the outage's age, capped here, so a multi-hour
+# provider outage is checked every 15 minutes rather than every minute.
+OVERLOAD_MAX_WAIT_SECONDS = int(os.environ.get("OVERLOAD_MAX_WAIT_SECONDS", "900"))
+
 # A job stuck waiting on something external (rate limit, ContentPipe busy) gives up after this
 # many days rather than retrying forever. Per-minute limits clear in seconds; a daily quota
 # clears at midnight Pacific; seven days of either means something is actually wrong.

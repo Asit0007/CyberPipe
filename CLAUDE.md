@@ -25,10 +25,12 @@ was built in ContentPipe — rendering belongs there, orchestration here.)
 ContentPipe's copies only matter for the UI); both persist progress
 (ContentPipe per chunk in `.runs/`, CyberPipe per stage in SQLite); and
 `pipeline._compute_midroll_markers` is a local fallback for mid-rolls that
-ContentPipe now computes itself. **Known conflict:** when ContentPipe returns no
-mid-rolls on purpose (runtime under 8:00, with a warning), the fallback still
-invents ~2:30 / ~6:00 markers and `review.py` lists them in the approval
-document next to that warning.
+ContentPipe now computes itself. That overlap is resolved in ContentPipe's favour
+(`pipeline._midroll_markers_for`, 2026-09-21): if its response carries `midrollMarkers`
+at all — even an empty list, which is what it returns under 8:00 alongside a warning —
+that is the answer, and the local guess is used only for a ContentPipe too old to send
+the field. It used to fall back on an empty list, which invented ~2:30 / ~6:00 markers
+(one after the last scene of a 5-minute script) next to ContentPipe's "not eligible" warning.
 
 ## Architecture
 
@@ -83,10 +85,19 @@ and the timeout sweep race safely: a stale read can never overwrite newer state.
   provider daily reset → 24h default), waiting on a busy ContentPipe (409
   `in_progress`; `StageBusy`), or a generic error under backoff
   (`config.BACKOFF_SCHEDULE_SECONDS`: 5m/15m/45m/2h/6h, `config.MAX_STAGE_ATTEMPTS`
-  before FAILED). Rate limits and busy-waits consume **no attempt**, but `wait_since`
-  caps an unbroken wait at `config.MAX_WAIT_DAYS` (7) so a stuck job fails instead of
-  retrying forever. `PermanentStageError` (ContentPipe `zero_quota` — needs billing)
-  fails immediately.
+  before FAILED). Rate limits, busy-waits and provider outages consume **no attempt**, but
+  `wait_since` caps an unbroken wait at `config.MAX_WAIT_DAYS` (7) so a stuck job fails
+  instead of retrying forever. `PermanentStageError` (ContentPipe `zero_quota` — needs
+  billing) fails immediately.
+  **A 503 from ContentPipe** (every model provider behind it overloaded, after its own
+  bounded wait) raises `UpstreamUnavailable` and is a wait too (fixed 2026-09-21; it used to
+  be an ordinary error that spent a backoff attempt and ignored its 30 s `Retry-After`, so a
+  multi-hour provider outage would have FAILED a job in ~9 h). The first retry follows the
+  hint; the wait then stretches to half the outage's age, capped at
+  `config.OVERLOAD_MAX_WAIT_SECONDS` (15 min) — quick to notice recovery, quiet through a
+  long outage. Runs are logged `unavailable`. The human is told once, after the outage has
+  lasted 15 min (`notify_upstream_unavailable`, keyed on `wait_since`); a blip that clears
+  in a minute pages nobody. A 502 (bad key, rejected request) stays an ordinary error.
 - **NEEDS_INPUT**: only the `script` stage raises this today
   (`pipeline.stage_script`), mirroring the spec's mandatory human checkpoint.
   `job.pending_payload` holds the already-generated draft so approving

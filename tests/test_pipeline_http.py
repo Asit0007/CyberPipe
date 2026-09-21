@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import pipeline
-from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy
+from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, UpstreamUnavailable
 from tests.support import FakeResponse
 
 
@@ -50,10 +50,23 @@ class PostContractTests(unittest.TestCase):
         self.assertIsInstance(exc, PermanentStageError)
         self.assertIn("limit: 0", str(exc))
 
-    def test_other_502_and_503_stay_ordinary_retryable_errors(self):
-        for status, body in ((502, {"kind": "upstream_error", "retryable": False}), (503, {"kind": "upstream_unavailable"})):
-            exc, _ = self.post(reply(status, body))
-            self.assertIs(type(exc), RuntimeError, status)
+    def test_503_is_a_wait_that_keeps_contentpipes_retry_hint(self):
+        """Every provider behind ContentPipe was overloaded. That is not this job's fault; it used to be an
+        ordinary error, which spent a backoff attempt and ignored the 30 s Retry-After."""
+        exc, _ = self.post(reply(503, {"kind": "upstream_unavailable", "retryAfterSec": 30}, retry_after="30"))
+        self.assertIsInstance(exc, UpstreamUnavailable)
+        self.assertEqual(exc.provider, "contentpipe:script")
+        self.assertAlmostEqual((exc.retry_at - datetime.now(timezone.utc)).total_seconds(), 30, delta=5)
+
+    def test_503_without_a_retry_after_carries_no_time_of_its_own(self):
+        exc, _ = self.post(reply(503, {"kind": "upstream_unavailable"}))
+        self.assertIsInstance(exc, UpstreamUnavailable)
+        self.assertIsNone(exc.retry_at)
+
+    def test_other_502_stays_an_ordinary_error(self):
+        """502 means bad key or a rejected request: waiting cannot fix it, so it keeps the finite backoff."""
+        exc, _ = self.post(reply(502, {"kind": "upstream_error", "retryable": False}))
+        self.assertIs(type(exc), RuntimeError)
 
     def test_a_non_json_error_body_does_not_mask_the_status(self):
         r = FakeResponse(502, {}, text="<html>Bad gateway</html>")
@@ -69,6 +82,41 @@ class PostContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MidrollPlacementTests(unittest.TestCase):
+    """ContentPipe decides mid-rolls. An empty list from it means "none are eligible", and CyberPipe must not
+    overrule that with a local guess."""
+
+    SCENES = [{"id": f"s{i}", "durationEst": 30, "narration": "x"} for i in range(10)]  # 5:00 runtime
+
+    def markers(self, **draft):
+        full = {"title": "t", "scenes": self.SCENES, **draft}
+        with mock.patch("pipeline._post", return_value=full):
+            try:
+                pipeline.stage_script({"input_payload": {"messageText": "x"}}, {"research": {}, "plan": {}})
+            except HumanInputRequired as done:
+                return done.payload["cyberpipe_midroll_markers"]
+
+    def test_a_short_script_that_contentpipe_placed_none_in_gets_none(self):
+        """Under 8:00 ContentPipe places no mid-rolls and warns. CyberPipe used to invent ~2:30 and ~6:00 anyway
+        (one after the last scene of a 5-minute script) and list them beside that warning."""
+        self.assertEqual(self.markers(midrollMarkers=[]), [])
+
+    def test_contentpipes_markers_are_used_when_it_placed_some(self):
+        server = [{"index": 1, "afterSceneNumber": 3, "targetSec": 150, "atSec": 90.0, "timestamp": "1:30", "reason": "after the setup"}]
+        got = self.markers(midrollMarkers=server)
+        self.assertEqual([(m["afterSceneIndex"], m["afterSceneId"], m["actualSec"]) for m in got], [(2, "s2", 90.0)])
+
+    def test_an_older_contentpipe_that_sends_no_field_still_gets_the_local_estimate(self):
+        got = self.markers()
+        self.assertEqual([m["targetSec"] for m in got], [150, 360])
+
+    def test_the_approval_document_lists_no_midroll_for_an_ineligible_script(self):
+        import review
+
+        draft = {"title": "t", "scenes": self.SCENES, "midrollMarkers": [], "cyberpipe_midroll_markers": self.markers(midrollMarkers=[])}
+        self.assertNotIn("Mid-roll", review.render_review_markdown({"id": 1, "pending_payload": draft}))
 
 
 class BrandDefaultTests(unittest.TestCase):

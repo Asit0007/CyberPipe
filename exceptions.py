@@ -52,6 +52,19 @@ class StageBusy(Exception):
         super().__init__(message)
 
 
+class UpstreamUnavailable(Exception):
+    """Raise when ContentPipe answered 503: every model provider behind it was overloaded or
+    unreachable, after its own bounded wait. Transient by definition and not this job's fault, so
+    worker.py parks the job (no attempt consumed) instead of burning the 5m/15m/45m/2h/6h backoff
+    on an outage that a 30 s retry hint says is short. `retry_at` is that hint, if the response
+    carried a Retry-After; the worker lengthens it the longer the outage lasts."""
+
+    def __init__(self, provider: str, retry_at: Optional[datetime] = None, message: str = ""):
+        self.provider = provider
+        self.retry_at = retry_at
+        super().__init__(message or f"{provider} unavailable")
+
+
 class PermanentStageError(Exception):
     """Raise when retrying can never help (e.g. ContentPipe's `zero_quota`: the key has no quota
     and needs billing). worker.py fails the job immediately instead of burning every backoff attempt."""
