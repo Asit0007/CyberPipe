@@ -67,11 +67,14 @@ DEFAULT_CYBER_TONE = (
     "enum: Deep Dive Documentary."
 )
 
-# Prompt 1's 8-10 minute target, midpoint. ContentPipe's /api/plan and
-# /api/script both honor targetDurationSec now (see ContentPipe's CLAUDE.md
-# for the chunked-generation fix) — previously this had nowhere to go and
-# every script defaulted to ContentPipe's ~60s Shorts-style pacing.
-DEFAULT_TARGET_DURATION_SEC = 540
+# Prompt 1 asks for 8-10 minutes. ContentPipe's /api/plan and /api/script both
+# honor targetDurationSec (see ContentPipe's CLAUDE.md for the chunked-generation
+# fix) — previously this had nowhere to go and every script defaulted to
+# ContentPipe's ~60s Shorts-style pacing.
+# 585 s, not the 540 s midpoint: ContentPipe's audit calls a script short below
+# 0.92 x target, and 0.92 x 540 = 497 s leaves almost no room over the 480 s
+# mid-roll floor, while 0.92 x 585 = 538 s clears it comfortably.
+DEFAULT_TARGET_DURATION_SEC = 585
 
 CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 

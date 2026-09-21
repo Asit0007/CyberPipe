@@ -47,7 +47,9 @@ value and it produced a script that welcomed viewers to a tool:
 
 Also sent to `/api/research`: the target duration. ContentPipe scales how much research it
 asks for off the length of the script it has to carry, so a 9-minute documentary isn't
-researched as though it were a 60-second short.
+researched as though it were a 60-second short. The default target is 585 s (`DEFAULT_TARGET_DURATION_SEC`):
+ContentPipe's audit calls a script short below 0.92 × target, and 585 s keeps that floor (538 s) safely above the
+480 s mid-roll minimum, which the old 540 s default did not.
 
 Every ContentPipe call sends `X-ContentPipe-Strict: 1`, so a quota hit or outage
 comes back as `429`/`503` with `Retry-After` — which becomes a scheduled retry at
@@ -130,7 +132,7 @@ behaviour, and what the request bodies sent to ContentPipe actually contain. See
 | 3. Script | Built — calls ContentPipe `/api/script`, mandatory Telegram approve/regenerate checkpoint; the approval message includes ContentPipe's audit findings (runtime shortfall, unsourced figures, mid-roll eligibility) and attaches the full draft |
 | Edit / upload a revised script | Not built — approve still commits the LLM draft as-is; the spec's "human rewrite is mandatory" needs a decision on how a revised script comes back |
 | 4. Image/video generation | Not started — no TTS/image/video provider keys yet |
-| 5. FFmpeg/Remotion assembly | Not started |
+| 5. FFmpeg/Remotion assembly | Built in ContentPipe (`server/assemble.ts` + sidecar SRT captions, proven on a stub render), but only as a module and script. CyberPipe does not call it yet, and nothing generates per-scene TTS and images to feed it |
 | Telegram `/status /jobs /retry ...` dashboard | Not started — only the approve/regenerate buttons work today |
 | Post-publish analytics feedback loop | Not started — needs YouTube Data + Analytics OAuth |
 

@@ -102,7 +102,7 @@ class BrandDefaultTests(unittest.TestCase):
     def test_research_asks_for_depth_matching_the_script_length(self):
         # ContentPipe scales its key-fact target off this; without it a 9-minute script is
         # researched as though it were a 60-second one.
-        self.assertEqual(self.stage(pipeline.stage_research, {"messageText": "x"}, outputs={})["targetDurationSec"], 540)
+        self.assertEqual(self.stage(pipeline.stage_research, {"messageText": "x"}, outputs={})["targetDurationSec"], 585)
         body = self.stage(pipeline.stage_research, {"messageText": "x", "targetDurationSec": 60}, outputs={})
         self.assertEqual(body["targetDurationSec"], 60)
 

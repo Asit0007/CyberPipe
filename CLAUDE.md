@@ -192,8 +192,9 @@ repo's `CLAUDE.md` "chunked script generation" section for the full
 writeup): `/api/plan` now honors a real `targetDurationSec`, and
 `/api/script` generates scenes in chunks sized to reach it, carrying prior
 scenes forward as context for continuity. `pipeline.py`'s `stage_plan` now
-sends `targetDurationSec` (default `DEFAULT_TARGET_DURATION_SEC = 540`, the
-spec's 8-10 minute midpoint) — before this fix it was never sent at all, so
+sends `targetDurationSec` (default `DEFAULT_TARGET_DURATION_SEC = 585`, inside the
+spec's 8-10 minutes; 540 left too little room over the 480 s mid-roll floor once
+ContentPipe's shortfall tolerance became 0.92) — before this fix it was never sent at all, so
 every script silently inherited ContentPipe's ~60s Shorts-style default.
 
 **Two operational constraints surfaced while verifying this, worth knowing
