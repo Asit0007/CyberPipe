@@ -93,7 +93,7 @@ sources actually read), so you approve what you've read, not a summary.
 | `CHANNEL_BRAND_NAME` | No | The show name ContentPipe writes into scripts when a job doesn't carry its own. Defaults to `Blast Radius`, matching ContentPipe's `DEFAULT_CHANNEL_BRAND`. Never set this to the name of this tool — it ends up spoken on camera. |
 | `CONTENTPIPE_BASE_URL` | No | Defaults to `http://localhost:3000`. |
 | `CONTENTPIPE_TIMEOUT_SECONDS` | No | Per-request timeout for research/plan, defaults to 180. |
-| `CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS` | No | Defaults to 1800 (30 min) — `/api/script` makes many sequential Gemini calls internally for a long-form script. |
+| `CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS` | No | Defaults to 1800 (30 min) — `/api/script` makes many sequential LLM calls internally for a long-form script. |
 | `DB_PATH` | No | Defaults to `pipeline.db` in this repo. |
 | `POLL_INTERVAL_SECONDS` | No | Scheduler tick interval, defaults to 60. |
 | `NEEDS_INPUT_TIMEOUT_HOURS` | No | A job waiting on your tap fails after this long, defaults to 72. |

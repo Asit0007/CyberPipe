@@ -212,7 +212,11 @@ before assuming a script will always come back at full length:**
    long-form script generation can burn through a meaningful chunk of a
    day's quota by itself. Watch this against the bi-weekly cadence once
    real production runs start — it's a capacity planning question, not
-   just a testing artifact.
+   just a testing artifact. *(2026-09-21: ContentPipe's provider chain —
+   on its `main` since 2026-09-21 — spreads text calls across
+   DeepSeek / Grok / free tiers with Gemini last, and a strict-mode 429 then
+   reports the earliest retry across ALL providers. Until provider keys are
+   added to ContentPipe's `.env` this is still the whole budget.)*
 
 `pipeline._compute_midroll_markers` now has a script long enough for the
 ~2:30/~6:00 placement to mean something, instead of degenerating to "after
