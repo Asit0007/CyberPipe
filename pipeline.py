@@ -1,10 +1,10 @@
 """Stage functions. Stages 1-3 call ContentPipe's existing /api/research,
 /api/plan, /api/script endpoints rather than reimplementing research/script
 generation — see the "CyberPipe orchestrator scope" decision. Stages 4-5
-(hero image/video generation, FFmpeg/Remotion assembly) are out of scope for
-this prototype: no TTS/image/video provider keys exist yet, and the goal
-right now is proving the durability + human-in-the-loop core, not spending
-on generation.
+(per-scene TTS/images, assembly) are not wired here yet: ContentPipe has
+strict /api/tts and /api/generate-image and a render module
+(server/assemble.ts), but nothing generates and checkpoints per-scene assets,
+and the goal so far has been proving the durability + human-in-the-loop core.
 
 Contract (cyberpipeline-prompts.md Prompt 4):
     def stage_x(job: dict, outputs: dict) -> dict

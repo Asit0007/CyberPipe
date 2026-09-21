@@ -12,6 +12,13 @@ that. Python, stdlib + `requests` + `sqlite3` only. See `CLAUDE.md` for the
 full architecture, the job state machine, current integration gaps, and the
 macOS deployment writeup — this file is quick start only.
 
+**Two repos, two jobs.** ContentPipe is the engine (it does every model call, the
+research, the script and its audit, and owns media and assembly); CyberPipe is the
+orchestrator around it (it turns a story into a durable job, survives crashes and
+quota hits, and makes a human approve the script). Neither duplicates the other's
+work: ContentPipe retries within one request for seconds, CyberPipe retries across
+requests for minutes to days. ContentPipe's README has the side-by-side table.
+
 ---
 
 ## Quick start
@@ -69,8 +76,9 @@ paths work.
 
 | Situation | Behaviour |
 |---|---|
-| ContentPipe returns 429 (quota) | Job is `SCHEDULED` for the `Retry-After` time, no attempt consumed, one ⏳ message. Gives up after `MAX_WAIT_DAYS`. |
+| ContentPipe returns 429 (quota) | Job is `SCHEDULED` for the `Retry-After` time, no attempt consumed. One ⏳ message per unbroken wait (plus one more if a short wait turns into a long one), not one per retry. Gives up after `MAX_WAIT_DAYS`. |
 | ContentPipe returns 409 (identical script still generating) | Waits and retries quietly — not counted as a failure. |
+| ContentPipe returns 503 (every provider overloaded) | Treated as an ordinary stage error: backoff below, consumes an attempt, ignores `Retry-After`. |
 | ContentPipe returns 502 `zero_quota` (key has no quota) | Fails immediately with a note to enable billing. |
 | Any other stage error | Backoff 5m / 15m / 45m / 2h / 6h, then `FAILED` after `MAX_STAGE_ATTEMPTS`. |
 | Scheduler killed or Mac restarted mid-stage | The job is re-queued on the next tick (counts as an attempt); ContentPipe resumes from its last finished chunk. |
@@ -131,7 +139,7 @@ behaviour, and what the request bodies sent to ContentPipe actually contain. See
 | 2. Plan | Built — calls ContentPipe `/api/plan`, including target video duration |
 | 3. Script | Built — calls ContentPipe `/api/script`, mandatory Telegram approve/regenerate checkpoint; the approval message includes ContentPipe's audit findings (runtime shortfall, unsourced figures, mid-roll eligibility) and attaches the full draft |
 | Edit / upload a revised script | Not built — approve still commits the LLM draft as-is; the spec's "human rewrite is mandatory" needs a decision on how a revised script comes back |
-| 4. Image/video generation | Not started — no TTS/image/video provider keys yet |
+| 4. Image/video generation | Not started here. ContentPipe's `/api/tts` and `/api/generate-image` already honor strict mode, so they are ready to be called; what is missing is a stage that generates and checkpoints every scene's audio and still (~51 TTS calls for a 585 s script, free-tier TTS quota unmeasured) |
 | 5. FFmpeg/Remotion assembly | Built in ContentPipe (`server/assemble.ts` + sidecar SRT captions, proven on a stub render), but only as a module and script. CyberPipe does not call it yet, and nothing generates per-scene TTS and images to feed it |
 | Telegram `/status /jobs /retry ...` dashboard | Not started — only the approve/regenerate buttons work today |
 | Post-publish analytics feedback loop | Not started — needs YouTube Data + Analytics OAuth |
@@ -139,7 +147,9 @@ behaviour, and what the request bodies sent to ContentPipe actually contain. See
 A `COMPLETED` job today means "script approved" — there's no stage after
 `script` yet. Full gap analysis against the original spec, including two
 operational constraints discovered while testing (a real Gemini schema
-limit, and the free tier's 20-requests/day/model cap) live in `CLAUDE.md`.
+limit, and Gemini's 20-requests/day/model free-tier cap — which ContentPipe's
+provider chain now spreads across DeepSeek / Grok / free tiers once their keys
+are set) live in `CLAUDE.md`.
 
 ---
 

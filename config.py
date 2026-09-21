@@ -38,7 +38,7 @@ CHANNEL_BRAND_NAME = os.environ.get("CHANNEL_BRAND_NAME", "Blast Radius")
 # --- ContentPipe (stages 1-3 call its API rather than reimplementing it) ---
 CONTENTPIPE_BASE_URL = os.environ.get("CONTENTPIPE_BASE_URL", "http://localhost:3000")
 CONTENTPIPE_TIMEOUT_SECONDS = int(os.environ.get("CONTENTPIPE_TIMEOUT_SECONDS", "180"))
-# /api/script now makes many sequential Gemini calls internally (one per
+# /api/script now makes many sequential LLM calls internally (one per
 # narrative/visual-direction chunk — see ContentPipe's CLAUDE.md) rather than
 # 2-3. Measured live 2026-09-19 under a free-tier quota crunch: individual
 # 429s alone added 11-59s of retry wait each, across up to ~25 chunks — the

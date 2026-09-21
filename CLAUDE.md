@@ -11,12 +11,24 @@ only: what's built, what's stubbed, and what's still a gap.
 
 ## Why a separate repo from ContentPipe
 
-ContentPipe's own CLAUDE.md documents "no video rendering — a deliberate
-decision" and a single-process Node/Express/Vite architecture with no
-database. This project needs Python, SQLite WAL, and long-running polling
-services — a different runtime paradigm. Keeping them separate avoids
-breaking ContentPipe's documented boundary and a Node/Python stack clash in
-one repo.
+ContentPipe is a single-process Node/Express/Vite server with no database and
+no notion of a job. This project needs Python, SQLite WAL, and long-running
+polling services under launchd — a different runtime paradigm. Keeping them
+separate avoids a Node/Python stack clash in one repo and keeps the contract
+between them an HTTP one (strict mode), which is what lets either side be tested
+against a stub of the other. (The original rationale also cited ContentPipe's
+"no video rendering" rule; that changed on 2026-09-21 when `server/assemble.ts`
+was built in ContentPipe — rendering belongs there, orchestration here.)
+
+**Where they overlap (deliberately small):** both default the show name to
+"Blast Radius" and the target to 585 s (CyberPipe always sends both, so
+ContentPipe's copies only matter for the UI); both persist progress
+(ContentPipe per chunk in `.runs/`, CyberPipe per stage in SQLite); and
+`pipeline._compute_midroll_markers` is a local fallback for mid-rolls that
+ContentPipe now computes itself. **Known conflict:** when ContentPipe returns no
+mid-rolls on purpose (runtime under 8:00, with a warning), the fallback still
+invents ~2:30 / ~6:00 markers and `review.py` lists them in the approval
+document next to that warning.
 
 ## Architecture
 
@@ -130,7 +142,7 @@ back (Telegram document reply vs. re-ingest through ContentPipe).
 | 2. Plan | Built — calls ContentPipe `/api/plan` |
 | 3. Script | Built — calls ContentPipe `/api/script`, raises the mandatory human checkpoint |
 | 4. Image/video generation | **Not started.** No TTS/image/video provider keys exist yet (ElevenLabs/Resemble, Replicate/fal.ai, Seedance/Kling/LTX/Runway/Pika) — deferred on purpose until the durability/HITL core above is proven, per the 2026-09-19 scoping decision. |
-| 5. FFmpeg/Remotion assembly | **Not started.** |
+| 5. FFmpeg/Remotion assembly | **Built in ContentPipe, not wired here.** `server/assemble.ts` (stills + narration → MP4, sidecar `.en.srt`) is a module + `npm run render:fixture`, proven on stub media. No endpoint, no CyberPipe stage, and nothing yet generates the per-scene TTS/images it needs. |
 | Telegram `/status /jobs /retry ...` dashboard (Prompt 5) | **Not started.** `telegram_poller.py` only handles the `job:<id>:<answer>` approve/regenerate buttons. |
 | Analytics feedback loop (Prompt 7) | **Not started.** Needs YouTube Data + Analytics OAuth. |
 
