@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import requests
@@ -142,12 +143,33 @@ def notify_input_required(job: dict[str, Any]) -> bool:
     return _notify_once(job["id"], f"needs_input:{job['current_stage']}:{job['attempt_count']}", text, keyboard, document)
 
 
+# A wait at least this long changes what the human should expect ("tomorrow", not "in a minute").
+LONG_WAIT_SECONDS = 15 * 60
+
+
+def _seconds_until(iso: str) -> float:
+    try:
+        when = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return float("inf")  # unparseable: treat as long, so it is announced rather than swallowed
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (when - datetime.now(timezone.utc)).total_seconds()
+
+
 def notify_rate_limited(job: dict[str, Any], provider: str, retry_at_iso: str) -> bool:
+    """One message per unbroken wait (job.wait_since), not one per retry. Keyed on the retry time,
+    a per-minute limit re-polled every minute paged the human every minute for up to MAX_WAIT_DAYS.
+    A short wait that turns into a long one (a daily cap) still gets its own message."""
+    long_wait = _seconds_until(retry_at_iso) >= LONG_WAIT_SECONDS
     text = (
         f"⏳ Job #{job['id']} rate limited (stage: {job['current_stage']}, provider: {provider})\n"
         f"Retrying at {retry_at_iso}"
     )
-    return _notify_once(job["id"], f"rate_limited:{job['current_stage']}:{retry_at_iso}", text)
+    if not long_wait:
+        text += "\nShort wait: further retries stay quiet unless it becomes a long one."
+    episode = job.get("wait_since") or retry_at_iso
+    return _notify_once(job["id"], f"rate_limited:{job['current_stage']}:{episode}:{'long' if long_wait else 'short'}", text)
 
 
 def notify_completed(job: dict[str, Any]) -> bool:

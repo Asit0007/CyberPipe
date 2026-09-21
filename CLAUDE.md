@@ -90,6 +90,11 @@ and the timeout sweep race safely: a stale read can never overwrite newer state.
   `config.TELEGRAM_RESEND_COOLDOWN_SECONDS`. Messages are plain text (no
   `parse_mode`): titles like "AT&T" or `<script>` broke Telegram's HTML mode.
   Regenerate clears the `needs_input:` keys so the next draft is announced again.
+- **Rate-limit messages are one per unbroken wait**, keyed
+  `rate_limited:<stage>:<wait_since>:<short|long>` (long = retry ≥ 15 min away). They used
+  to be keyed on the retry time, which changes on every re-poll, so a per-minute limit (or a
+  daily cap ContentPipe misreported as 60 s — fixed there too, 2026-09-21) paged Telegram
+  every minute for up to `MAX_WAIT_DAYS`. A short wait that turns long still pages once more.
 
 ### Channel brand
 

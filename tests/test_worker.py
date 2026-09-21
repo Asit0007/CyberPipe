@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import socket
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import config
@@ -187,6 +188,44 @@ class WaitingStateTests(DbTestCase):
         with mock.patch.dict(worker.STAGE_FUNCTIONS, {"research": ok_stage}):
             worker.run_job(job_id)
         self.assertIsNone(db.get_job(job_id)["wait_since"])
+
+
+class RateLimitNotificationTests(DbTestCase):
+    """A per-minute limit re-polls every minute with a new retry time each time; that must not page
+    the human every minute. One message per unbroken wait, plus one if the wait turns long."""
+
+    def limited_run(self, job_id: int, retry_in: timedelta) -> None:
+        self.set_raw(job_id, next_retry_at=self.ago(seconds=1))  # due again
+        stage = mock.Mock(side_effect=RateLimitError("contentpipe:script", retry_at=datetime.now(timezone.utc) + retry_in))
+        with mock.patch.dict(worker.STAGE_FUNCTIONS, {"script": stage}):
+            worker.run_job(job_id)
+
+    def rate_limit_messages(self) -> list[str]:
+        return [m["text"] for m in self.telegram.messages if "rate limited" in m["text"]]
+
+    def test_repeated_short_waits_page_once(self):
+        job_id = self.make_job("script")
+        for _ in range(5):
+            self.limited_run(job_id, timedelta(seconds=60))
+        self.assertEqual(db.get_job(job_id)["status"], "SCHEDULED")
+        self.assertEqual(len(self.rate_limit_messages()), 1)
+        self.assertIn("Short wait", self.rate_limit_messages()[0])
+
+    def test_a_short_wait_that_turns_long_pages_again_once(self):
+        job_id = self.make_job("script")
+        self.limited_run(job_id, timedelta(seconds=60))
+        self.limited_run(job_id, timedelta(hours=16))
+        self.limited_run(job_id, timedelta(hours=15))
+        messages = self.rate_limit_messages()
+        self.assertEqual(len(messages), 2)
+        self.assertNotIn("Short wait", messages[1])
+
+    def test_a_new_wait_after_progress_is_announced(self):
+        job_id = self.make_job("script")
+        self.limited_run(job_id, timedelta(seconds=60))
+        db.update_job(job_id, wait_since=None)  # what a successful stage does
+        self.limited_run(job_id, timedelta(seconds=60))
+        self.assertEqual(len(self.rate_limit_messages()), 2)
 
 
 class OrphanReclaimTests(DbTestCase):
