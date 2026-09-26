@@ -64,7 +64,7 @@ submit_job.py ──> jobs table (PENDING) ──┐
 ```
 
 `ContentPipe` must be running separately (`npm run dev` in that repo) for
-stages 1-3 to have something to call.
+stages 1-3 — and, for images, clips and the analyst voice, stages 4-5 — to have something to call.
 
 ## Job state machine
 
@@ -98,8 +98,8 @@ and the timeout sweep race safely: a stale read can never overwrite newer state.
   long outage. Runs are logged `unavailable`. The human is told once, after the outage has
   lasted 15 min (`notify_upstream_unavailable`, keyed on `wait_since`); a blip that clears
   in a minute pages nobody. A 502 (bad key, rejected request) stays an ordinary error.
-- **NEEDS_INPUT**: only the `script` stage raises this today
-  (`pipeline.stage_script`), mirroring the spec's mandatory human checkpoint.
+- **NEEDS_INPUT**: raised by `script` (`pipeline.stage_script`, the spec's mandatory human checkpoint) and, since
+  2026-09-26, by the three ContentRender stages (`images`, `narration`, `bundle`) — see "ContentRender stages" below.
   `job.pending_payload` holds the already-generated draft so approving
   doesn't recompute it; regenerating clears it and re-runs the stage. Approve
   commits the draft and advances in **one** write. The approval message carries the
@@ -152,14 +152,44 @@ back (Telegram document reply vs. re-ingest through ContentPipe).
 | 1. Research | Built — calls ContentPipe `/api/research` |
 | 2. Plan | Built — calls ContentPipe `/api/plan` |
 | 3. Script | Built — calls ContentPipe `/api/script`, raises the mandatory human checkpoint |
-| 4. Image/video generation | **Not started.** No TTS/image/video provider keys exist yet (ElevenLabs/Resemble, Replicate/fal.ai, Seedance/Kling/LTX/Runway/Pika) — deferred on purpose until the durability/HITL core above is proven, per the 2026-09-19 scoping decision. |
-| 5. FFmpeg/Remotion assembly | **Built in ContentPipe, not wired here.** `server/assemble.ts` (stills + narration → MP4, sidecar `.en.srt`) is a module + `npm run render:fixture`, proven on stub media. No endpoint, no CyberPipe stage, and nothing yet generates the per-scene TTS/images it needs. |
+| 4. `images` — stills | **Built (2026-09-26)** — runs ContentRender's CLI; gate: the stills as Telegram albums. |
+| 5. `narration` — AI clips + two-voice narration | **Built** — same CLI; gate: one MP3 of the whole narration. Kokoro is local, Charon goes through ContentPipe. |
+| 6. `bundle` — the DaVinci Resolve bundle | **Built** — FCPXML timeline, captions, rough-cut MP4 under `ContentRender/.render/runs/job-<id>/resolve/`; gate: the rough cut. Approve → COMPLETED. Verified end to end on **stub media** (tests/test_e2e_contentrender.py); not yet on a real story, and the timeline is not yet proven to import cleanly into Resolve. |
 | Telegram `/status /jobs /retry ...` dashboard (Prompt 5) | **Not started.** `telegram_poller.py` only handles the `job:<id>:<answer>` approve/regenerate buttons. |
 | Analytics feedback loop (Prompt 7) | **Not started.** Needs YouTube Data + Analytics OAuth. |
 
-A COMPLETED job today just means "script approved" — there is no stage after
-`script` yet. That's intentional: `pipeline.PIPELINE_STAGES` is the seam
-where stages 4/5 get appended once their providers are chosen and keyed.
+A COMPLETED job now means the Resolve bundle was approved. `pipeline.PIPELINE_STAGES` is
+`research → plan → script → images → narration → bundle`.
+
+### ContentRender stages (2026-09-26)
+
+`../ContentRender` is a **command line, not a server**. Each of the three stages calls
+`node node_modules/tsx/dist/cli.mjs scripts/cli.ts step --brief data/briefs/job-<id>.json --video-id job-<id>`
+(`pipeline._run_render`) and reads **one JSON outcome from the last stdout line**; the exit code only says the
+process crashed (→ ordinary backoff). ContentRender keeps its own per-asset manifest, so a crash or a quota wall resumes where it stopped.
+
+| Outcome | Becomes |
+|---|---|
+| `progress` (time budget used, or a retryable failure) | `StageInProgress` — re-queued at `retryInSec`, **no attempt, no page, `wait_since` cleared** (each call moved the run forward) |
+| `gate` (the one this stage expects) | `HumanInputRequired`, payload `{gate, review}`; the notifier sends the review files |
+| `rate_limited` | `RateLimitError` (quota) / `UpstreamUnavailable` (overloaded), with ContentRender's own retry time |
+| `error` | `PermanentStageError` — a human has to fix something (e.g. a scene gave up after 3 attempts) |
+| a gate the stage did not expect | `PermanentStageError`, never a silent approval |
+
+Human decisions reach ContentRender's manifest: each stage first runs `approve --gate <previous>` (idempotent, so a crash between the
+Telegram tap and the manifest cannot desync them); the final approval and every regenerate go through
+`pipeline.ON_APPROVE` / `ON_REGENERATE`, called by `worker.resume_from_input` **before** it moves the job — a hook that fails leaves
+the job waiting, so repeating the tap retries. `/regen <job> <scenes>` (telegram_poller) redoes just those scenes at the images or
+narration gate (`worker.regenerate_scenes`). The notifier sends stills as `sendMediaGroup` albums of ≤10 (a lone one as `sendPhoto`),
+the narration as `sendAudio`, the rough cut as `sendVideo` (only if ≤ 48 MB); anything it could not attach is named in the approval
+message so nobody approves blind.
+
+Config (`.env.example`): `CONTENTRENDER_DIR`, `CONTENTRENDER_NODE` (**absolute path** — launchd has no PATH),
+`CONTENTRENDER_STEP_BUDGET_SECONDS` (1200), `CONTENTRENDER_TIMEOUT_SECONDS` (budget + 900), `BRIEFS_DIR`. `RUNNING_LEASE_SECONDS` now defaults to the
+longer of the script and ContentRender timeouts, plus 600. **ContentPipe must be running** for images, clips and Charon; Kokoro needs
+`npm run kokoro:setup` in ContentRender. Tests: `tests/test_render_stages.py` (fakes `_run_render`), and the opt-in
+`CONTENTRENDER_E2E=1 ./venv/bin/python -m unittest tests.test_e2e_contentrender` drives the **real** CLI on stub media through all three gates.
+The older state-machine tests are pinned to the original three stages via `DbTestCase.stages`.
 
 ## Integration gaps vs. the original prompt spec
 
