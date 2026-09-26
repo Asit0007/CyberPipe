@@ -46,17 +46,21 @@ that's the record of why it was needed):
 """
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 import requests
 
 import config
 import rate_limiter
-from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, UpstreamUnavailable
+from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, StageInProgress, UpstreamUnavailable
 
-PIPELINE_STAGES = ["research", "plan", "script"]
+PIPELINE_STAGES = ["research", "plan", "script", "images", "narration", "bundle"]
 
 # Prompt 1's tone spec verbatim: "authoritative, investigative, slightly
 # urgent, no fearmongering, no clickbait". Shapes hookStrategy/pacingStyle/
@@ -319,8 +323,157 @@ def stage_script(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]
     raise HumanInputRequired(question=question, options=["approve", "regenerate"], payload=draft)
 
 
+# ------------------------------------------------------------------------------------ ContentRender stages
+#
+# Stages 4-6 hand the approved script to ContentRender (../ContentRender) and let it do the media work:
+#
+#   images     one still per scene                      -> gate "images"    (Telegram: the stills)
+#   narration  AI clips, then two-voice narration       -> gate "narration" (Telegram: one audio file)
+#   bundle     timeline, rough cut, Resolve bundle      -> gate "final"     (Telegram: the rough cut)
+#
+# ContentRender keeps its own manifest per run (`job-<id>`), so a crash, a quota wall or a re-run resumes where
+# it stopped; this side keeps the human decisions. Each call is `cli.ts step`, which does as much as its time
+# budget allows and prints ONE JSON outcome as its last line (see ContentRender/src/step.ts). The exit code only
+# says whether the process itself crashed, so a "rate_limited" or "error" outcome is a normal exit.
+
+# Which ContentRender gate each of our stages waits at, and which gate must already be closed when it starts.
+RENDER_GATES = {"images": ("images", None), "narration": ("narration", "images"), "bundle": ("final", "narration")}
+
+
+def _render_command(*args: str) -> list[str]:
+    return [config.CONTENTRENDER_NODE, "node_modules/tsx/dist/cli.mjs", "scripts/cli.ts", *args]
+
+
+def _write_brief(job: dict[str, Any], outputs: dict[str, Any]) -> Path:
+    """The approved script, where ContentRender reads it. Rewritten only when it changed."""
+    script = outputs.get("script")
+    if not script or not script.get("scenes"):
+        raise PermanentStageError("the approved script has no scenes, so there is nothing to render")
+    path = Path(config.BRIEFS_DIR) / f"job-{job['id']}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(script, ensure_ascii=False)
+    if not path.exists() or path.read_text(encoding="utf-8") != text:
+        path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _run_render(command: str, job: dict[str, Any], brief: Path, *extra: str) -> dict[str, Any]:
+    """Runs one ContentRender command and returns its JSON outcome. A crash, a timeout, or output that is not JSON
+    raises RuntimeError, so it takes the ordinary backoff path (5m/15m/45m...)."""
+    args = [command, "--brief", str(brief), "--video-id", f"job-{job['id']}", *extra]
+    try:
+        done = subprocess.run(
+            _render_command(*args), cwd=config.CONTENTRENDER_DIR, capture_output=True, text=True,
+            timeout=config.CONTENTRENDER_TIMEOUT_SECONDS, env={**os.environ, "CONTENTPIPE_BASE_URL": config.CONTENTPIPE_BASE_URL},
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"ContentRender {command} exceeded {config.CONTENTRENDER_TIMEOUT_SECONDS}s and was killed") from exc
+    except OSError as exc:
+        raise RuntimeError(f"could not start ContentRender ({config.CONTENTRENDER_NODE} in {config.CONTENTRENDER_DIR}): {exc}") from exc
+    lines = [ln for ln in done.stdout.splitlines() if ln.strip()]
+    tail = done.stderr.strip().splitlines()[-6:]
+    if done.returncode != 0:
+        raise RuntimeError(f"ContentRender {command} crashed (exit {done.returncode}): {' | '.join(tail)}")
+    try:
+        outcome = json.loads(lines[-1])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError(f"ContentRender {command} printed no JSON outcome. stderr: {' | '.join(tail)}") from exc
+    if not isinstance(outcome, dict) or "status" not in outcome:
+        raise RuntimeError(f"ContentRender {command} printed an unrecognised outcome: {lines[-1][:200]}")
+    return outcome
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    """ContentRender writes JS-style timestamps ("...T18:00:00.000Z"); older Pythons cannot read the Z."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _render_ok(command: str, job: dict[str, Any], brief: Path, *extra: str) -> dict[str, Any]:
+    """For the small commands (approve, regenerate): anything but status "ok" is an error."""
+    outcome = _run_render(command, job, brief, *extra)
+    if outcome["status"] != "ok":
+        raise RuntimeError(f"ContentRender {command} refused: {'; '.join(outcome.get('problems') or [json.dumps(outcome)[:200]])}")
+    return outcome
+
+
+def _drive(job: dict[str, Any], outputs: dict[str, Any], stage: str) -> dict[str, Any]:
+    expected_gate, previous_gate = RENDER_GATES[stage]
+    brief = _write_brief(job, outputs)
+    if previous_gate:
+        # Idempotent: the human already said yes in Telegram, this makes ContentRender's manifest agree even if a
+        # crash landed between the two.
+        _render_ok("approve", job, brief, "--gate", previous_gate)
+    outcome = _run_render("step", job, brief, "--budget", str(config.CONTENTRENDER_STEP_BUDGET_SECONDS))
+    status = outcome["status"]
+
+    if status == "progress":
+        wait = max(5, int(outcome.get("retryInSec", 30)))
+        raise StageInProgress(f'{stage}: {outcome.get("note", "more to do")}', retry_at=datetime.now(timezone.utc) + timedelta(seconds=wait))
+    if status == "rate_limited":
+        retry_at = _parse_iso(outcome.get("retryAt"))
+        provider = outcome.get("provider", "contentrender")
+        if outcome.get("kind") == "overloaded":
+            raise UpstreamUnavailable(provider, retry_at=retry_at, message=outcome.get("message", ""))
+        raise RateLimitError(provider, retry_at=retry_at, message=outcome.get("message", ""))
+    if status == "error":
+        raise PermanentStageError("; ".join(outcome.get("problems") or ["ContentRender reported an error"]))
+    if status == "delivered":
+        return {"delivered": True, "videoId": outcome.get("videoId")}
+    if status == "gate":
+        if outcome.get("gate") != expected_gate:
+            raise PermanentStageError(f'ContentRender is waiting at the "{outcome.get("gate")}" gate but stage {stage} expected "{expected_gate}"')
+        review = outcome.get("review") or {}
+        question = f'{review.get("title", "Render")} — {review.get("summary", "approval needed")}'
+        raise HumanInputRequired(question=question, options=["approve", "regenerate"], payload={"gate": expected_gate, "review": review})
+    raise PermanentStageError(f"unknown ContentRender outcome {status!r}")
+
+
+def stage_images(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]:
+    return _drive(job, outputs, "images")
+
+
+def stage_narration(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]:
+    return _drive(job, outputs, "narration")
+
+
+def stage_bundle(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]:
+    return _drive(job, outputs, "bundle")
+
+
+# Human decisions have to reach ContentRender's manifest too. worker.resume_from_input calls these: ON_REGENERATE
+# before it re-queues a stage (so the redo starts from clean assets), ON_APPROVE before it advances (only the last
+# gate needs it; earlier ones are closed at the start of the next stage). A hook that raises leaves the job
+# waiting, so the same tap can simply be repeated.
+def _hook(command: str, *extra: str) -> Callable[[dict[str, Any], dict[str, Any]], None]:
+    def run(job: dict[str, Any], outputs: dict[str, Any]) -> None:
+        _render_ok(command, job, _write_brief(job, outputs), *extra)
+    return run
+
+
+ON_APPROVE: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {"bundle": _hook("approve", "--gate", "final")}
+ON_REGENERATE: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
+    "images": _hook("regenerate", "--kind", "still", "--all"),
+    "narration": _hook("regenerate", "--kind", "narration", "--all"),
+    "bundle": _hook("regenerate", "--kind", "render"),
+}
+
+
+def regenerate_scenes(job: dict[str, Any], outputs: dict[str, Any], kind: str, scenes: list[int]) -> None:
+    """Per-scene redo from Telegram (/regen). `kind` is "still" or "narration"."""
+    _render_ok("regenerate", job, _write_brief(job, outputs), "--kind", kind, "--scenes", ",".join(str(n) for n in scenes))
+
+
 STAGE_FUNCTIONS = {
     "research": stage_research,
     "plan": stage_plan,
     "script": stage_script,
+    "images": stage_images,
+    "narration": stage_narration,
+    "bundle": stage_bundle,
 }

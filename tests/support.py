@@ -19,6 +19,7 @@ from unittest import mock
 import config
 import db
 import notifier
+import pipeline
 
 # Shaped like a bot token (digits:secret) so the redaction regex is really exercised, but the secret
 # half is deliberately shorter than a real one (35 chars) so secret scanners don't flag this repo.
@@ -80,6 +81,10 @@ class DbTestCase(unittest.TestCase):
     """Fresh DB + configured fake Telegram per test."""
 
     telegram_configured = True
+    # The state-machine tests are about how a job moves through *some* stages (approve completes it, a rate limit
+    # parks it), not about which stages exist, so they run against the original three; a job that approves its
+    # script is COMPLETED there. Tests of the ContentRender stages set `stages = pipeline.PIPELINE_STAGES`.
+    stages = ["research", "plan", "script"]
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -88,6 +93,7 @@ class DbTestCase(unittest.TestCase):
             mock.patch.object(config, "DB_PATH", os.path.join(self._tmp.name, "test.db")),
             mock.patch.object(config, "TELEGRAM_BOT_TOKEN", TEST_TOKEN if self.telegram_configured else ""),
             mock.patch.object(config, "TELEGRAM_CHAT_ID", TEST_CHAT_ID if self.telegram_configured else ""),
+            mock.patch.object(pipeline, "PIPELINE_STAGES", list(self.stages)),
         ]
         for p in self._patches:
             p.start()

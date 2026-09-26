@@ -6,6 +6,7 @@ after editing it (same gotcha as ContentPipe's server.ts).
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -46,6 +47,20 @@ CONTENTPIPE_TIMEOUT_SECONDS = int(os.environ.get("CONTENTPIPE_TIMEOUT_SECONDS", 
 # a human is blocked on, so a long ceiling costs nothing in the common case.
 CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS = int(os.environ.get("CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS", "1800"))
 
+# --- ContentRender (stages 4-6: images, clips + narration, the Resolve bundle) ---
+# ContentRender is a command line, not a server: every stage runs `cli.ts step` as a subprocess and gets one
+# JSON outcome back. launchd has no PATH, so CONTENTRENDER_NODE should be an absolute path (default: the node
+# found on PATH when this file is imported, which is right for a terminal and for a plist that sets PATH).
+CONTENTRENDER_DIR = os.environ.get("CONTENTRENDER_DIR", str(BASE_DIR.parent / "ContentRender"))
+CONTENTRENDER_NODE = os.environ.get("CONTENTRENDER_NODE", shutil.which("node") or "node")
+# Seconds of work a single `step` may START (an asset already running finishes). Kept well under RUNNING_LEASE_SECONDS.
+CONTENTRENDER_STEP_BUDGET_SECONDS = int(os.environ.get("CONTENTRENDER_STEP_BUDGET_SECONDS", "1200"))
+# Hard ceiling on one subprocess: the budget plus the longest single thing it can be in the middle of
+# (an AI clip, up to 10 min) and slack. Past this the process is killed and the attempt counts as an error.
+CONTENTRENDER_TIMEOUT_SECONDS = int(os.environ.get("CONTENTRENDER_TIMEOUT_SECONDS", str(CONTENTRENDER_STEP_BUDGET_SECONDS + 900)))
+# Where the approved script is written for ContentRender to read (one JSON file per job).
+BRIEFS_DIR = os.environ.get("BRIEFS_DIR", str(BASE_DIR / "data" / "briefs"))
+
 # --- Persistence -------------------------------------------------------------
 DB_PATH = os.environ.get("DB_PATH", str(BASE_DIR / "pipeline.db"))
 
@@ -82,7 +97,7 @@ MAX_WAIT_DAYS = int(os.environ.get("MAX_WAIT_DAYS", "7"))
 # A RUNNING job whose lease is older than this is treated as orphaned even if its recorded
 # pid looks alive (pid reuse after a reboot; a lock written by another machine). It must
 # exceed the longest legitimate stage: /api/script's own client timeout, plus slack.
-RUNNING_LEASE_SECONDS = int(os.environ.get("RUNNING_LEASE_SECONDS", str(CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS + 600)))
+RUNNING_LEASE_SECONDS = int(os.environ.get("RUNNING_LEASE_SECONDS", str(max(CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS, CONTENTRENDER_TIMEOUT_SECONDS) + 600)))
 
 # After a Telegram delivery fails, don't retry that same event more often than this.
 TELEGRAM_RESEND_COOLDOWN_SECONDS = int(os.environ.get("TELEGRAM_RESEND_COOLDOWN_SECONDS", "300"))

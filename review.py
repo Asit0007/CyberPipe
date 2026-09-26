@@ -7,6 +7,7 @@ the sources that were actually read — as Markdown that is attached to the appr
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
 
@@ -76,3 +77,37 @@ def render_review_markdown(job: dict[str, Any]) -> Optional[str]:
             out.append("Sources: " + " ".join(f"[{c}]" for c in scene["citations"]))
         t += dur
     return "\n".join(out) + "\n"
+
+
+# Telegram's bot API takes up to 50 MB per upload (10 MB for a photo).
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_PHOTO_BYTES = 10 * 1024 * 1024
+MEDIA_KINDS = ("photo", "audio", "video", "document")
+
+
+def media_attachments(job: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Files ContentRender wants shown at a media gate (stills, the narration, the rough cut), read from disk.
+
+    Returns (attachments, problems). A file that is missing, too big for Telegram, or of an unknown kind is skipped
+    and named in `problems`, so the message can say what it could not attach instead of the human approving blind.
+    Each attachment: {kind, filename, content (bytes), caption}.
+    """
+    review_data = (job.get("pending_payload") or {}).get("review") or {}
+    attachments: list[dict[str, Any]] = []
+    problems: list[str] = []
+    for f in review_data.get("files") or []:
+        kind, path = f.get("kind"), f.get("path")
+        name = os.path.basename(path or "") or "file"
+        if kind not in MEDIA_KINDS or not path:
+            problems.append(f"{name}: unknown kind {kind!r}")
+            continue
+        try:
+            size = os.path.getsize(path)
+            if size > (MAX_PHOTO_BYTES if kind == "photo" else MAX_UPLOAD_BYTES):
+                problems.append(f"{name}: {size // (1024 * 1024)} MB is over Telegram's limit")
+                continue
+            with open(path, "rb") as fh:
+                attachments.append({"kind": kind, "filename": name, "content": fh.read(), "caption": f.get("caption") or ""})
+        except OSError as exc:
+            problems.append(f"{name}: {exc.strerror or exc}")
+    return attachments, problems

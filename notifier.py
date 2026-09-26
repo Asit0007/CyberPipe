@@ -12,6 +12,7 @@ Messages are plain text on purpose. They carry story titles and error text ("AT&
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 from datetime import datetime, timezone
@@ -70,7 +71,7 @@ def _call(method: str, **request_kwargs: Any) -> bool:
     """One Telegram API call. True only if Telegram accepted it."""
     url = f"{API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/{method}"
     try:
-        resp = requests.post(url, timeout=30 if "files" in request_kwargs else 10, **request_kwargs)
+        resp = requests.post(url, timeout=180 if "files" in request_kwargs else 10, **request_kwargs)
     except requests.RequestException as exc:
         print(f"[notifier] Telegram {method} failed: {redact_secrets(str(exc))}")
         return False
@@ -100,12 +101,71 @@ def send_document(filename: str, content: bytes, caption: Optional[str] = None) 
     return _call("sendDocument", data=data, files={"document": (filename, content, "text/markdown")})
 
 
+PHOTOS_PER_GROUP = 10  # sendMediaGroup's maximum
+
+
+def send_photos(photos: list[dict[str, Any]]) -> bool:
+    """Photos as albums of up to ten (one message per album, so a 14-scene script is two). A lone photo cannot be an
+    album, so a remainder of one goes as a plain photo. True only if every call was accepted."""
+    if not _configured():
+        return False
+    ok = True
+    for i in range(0, len(photos), PHOTOS_PER_GROUP):
+        chunk = photos[i:i + PHOTOS_PER_GROUP]
+        if len(chunk) == 1:
+            p = chunk[0]
+            data = {"chat_id": config.TELEGRAM_CHAT_ID, "caption": p["caption"][:MAX_CAPTION_CHARS]}
+            ok &= _call("sendPhoto", data=data, files={"photo": (p["filename"], p["content"], "image/jpeg")})
+            continue
+        media = [{"type": "photo", "media": f"attach://p{n}", "caption": p["caption"][:MAX_CAPTION_CHARS]} for n, p in enumerate(chunk)]
+        files = {f"p{n}": (p["filename"], p["content"], "image/jpeg") for n, p in enumerate(chunk)}
+        ok &= _call("sendMediaGroup", data={"chat_id": config.TELEGRAM_CHAT_ID, "media": json.dumps(media)}, files=files)
+    return ok
+
+
+def send_audio(filename: str, content: bytes, caption: str = "") -> bool:
+    if not _configured():
+        return False
+    data: dict[str, Any] = {"chat_id": config.TELEGRAM_CHAT_ID, "title": filename.rsplit(".", 1)[0]}
+    if caption:
+        data["caption"] = caption[:MAX_CAPTION_CHARS]
+    return _call("sendAudio", data=data, files={"audio": (filename, content, "audio/mpeg")})
+
+
+def send_video(filename: str, content: bytes, caption: str = "") -> bool:
+    if not _configured():
+        return False
+    data: dict[str, Any] = {"chat_id": config.TELEGRAM_CHAT_ID, "supports_streaming": "true"}
+    if caption:
+        data["caption"] = caption[:MAX_CAPTION_CHARS]
+    return _call("sendVideo", data=data, files={"video": (filename, content, "video/mp4")})
+
+
+def send_media(attachments: list[dict[str, Any]]) -> list[str]:
+    """Sends a media gate's files in a sensible order (photos, then audio, then video, then documents) and returns
+    the names of any that Telegram did not accept."""
+    failed: list[str] = []
+    photos = [a for a in attachments if a["kind"] == "photo"]
+    if photos and not send_photos(photos):
+        failed.append(f"{len(photos)} photo(s)")
+    for a in attachments:
+        if a["kind"] == "audio" and not send_audio(a["filename"], a["content"], a["caption"]):
+            failed.append(a["filename"])
+        elif a["kind"] == "video" and not send_video(a["filename"], a["content"], a["caption"]):
+            failed.append(a["filename"])
+        elif a["kind"] == "document" and not send_document(a["filename"], a["content"], a["caption"]):
+            failed.append(a["filename"])
+    return failed
+
+
 def _notify_once(
     job_id: int,
     event_key: str,
     text: str,
     reply_markup: Optional[dict[str, Any]] = None,
     document: Optional[tuple[str, bytes]] = None,
+    media: Optional[list[dict[str, Any]]] = None,
+    media_problems: Optional[list[str]] = None,
 ) -> bool:
     """Send at most once per (job, event). True if this call delivered it."""
     job = db.get_job(job_id)
@@ -120,6 +180,11 @@ def _notify_once(
     if document is not None and not send_document(*document, caption=f"Job #{job_id} — full draft"):
         # Don't hold the approval back for it, but never let the human approve unaware.
         text += f"\n⚠️ The draft could not be attached to this message. Read job #{job_id}'s pending_payload before approving."
+    unsent = list(media_problems or [])
+    if media:
+        unsent += send_media(media)
+    if unsent:
+        text += f"\n⚠️ Could not attach: {', '.join(unsent)}. Look in the run folder before approving."
     if not send_message(text, reply_markup):
         _last_failure[(job_id, event_key)] = _monotonic()
         return False
@@ -140,7 +205,10 @@ def notify_input_required(job: dict[str, Any]) -> bool:
     text = f"🟡 Job #{job['id']} needs input (stage: {job['current_stage']})\n{question}"
     draft = review.render_review_markdown(job)
     document = (f"job-{job['id']}-script-draft.md", draft.encode("utf-8")) if draft else None
-    return _notify_once(job["id"], f"needs_input:{job['current_stage']}:{job['attempt_count']}", text, keyboard, document)
+    media, media_problems = review.media_attachments(job)
+    if (job.get("pending_payload") or {}).get("gate") in ("images", "narration", "final"):
+        text += f"\nRegenerate redoes everything at this step; /regen {job['id']} 3,7 redoes just those scenes." if job["current_stage"] in ("images", "narration") else ""
+    return _notify_once(job["id"], f"needs_input:{job['current_stage']}:{job['attempt_count']}", text, keyboard, document, media, media_problems)
 
 
 # A wait at least this long changes what the human should expect ("tomorrow", not "in a minute").
@@ -185,7 +253,11 @@ def notify_upstream_unavailable(job: dict[str, Any], waited_sec: float) -> bool:
 
 
 def notify_completed(job: dict[str, Any]) -> bool:
-    return _notify_once(job["id"], "completed", f"✅ Job #{job['id']} completed.")
+    text = f"✅ Job #{job['id']} completed."
+    bundle = ((job.get("stage_outputs") or {}).get("bundle") or {}).get("review") or {}
+    if bundle.get("summary"):
+        text += f"\n{bundle['summary'].splitlines()[0]}"  # first line names the bundle folder
+    return _notify_once(job["id"], "completed", text)
 
 
 def notify_failed(job: dict[str, Any]) -> bool:

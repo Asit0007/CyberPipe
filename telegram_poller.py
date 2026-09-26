@@ -96,10 +96,54 @@ def _handle_callback_query(callback_query: dict[str, Any]) -> None:
         print(f"[telegram_poller] job #{job_id}: {answer!r} ignored (already handled, or nothing to apply)")
 
 
+def _reply(text: str) -> None:
+    try:
+        _api("sendMessage", chat_id=config.TELEGRAM_CHAT_ID, text=text)
+    except TelegramAPIError as exc:
+        print(f"[telegram_poller] could not reply: {exc}")
+
+
+REGEN_USAGE = "Usage: /regen <job number> <scene numbers>   e.g. /regen 12 3,7,9"
+
+
+def parse_regen(text: str) -> Optional[tuple[int, list[int]]]:
+    """`/regen 12 3,7 9` -> (12, [3, 7, 9]); None if it does not parse. Scene numbers may be separated by commas or spaces."""
+    parts = text.replace(",", " ").split()
+    if len(parts) < 3 or parts[0].split("@")[0].lower() != "/regen":
+        return None
+    try:
+        job_id = int(parts[1].lstrip("#"))
+        scenes = sorted({int(p) for p in parts[2:]})
+    except ValueError:
+        return None
+    return (job_id, scenes) if scenes and all(n > 0 for n in scenes) else None
+
+
+def _handle_message(message: dict[str, Any]) -> None:
+    text = (message.get("text") or "").strip()
+    if not text.startswith("/regen"):
+        return  # the rest of the slash-command dashboard (/status, /jobs, ...) is a later phase
+    if not _is_authorized(message.get("from", {})):
+        print(f"[telegram_poller] ignoring /regen from unauthorized chat {message.get('from', {}).get('id')}")
+        return
+    parsed = parse_regen(text)
+    if parsed is None:
+        _reply(REGEN_USAGE)
+        return
+    job_id, scenes = parsed
+    try:
+        _, reply = worker.regenerate_scenes(job_id, scenes)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[telegram_poller] job #{job_id}: /regen raised: {notifier.redact_secrets(str(exc))}")
+        reply = "Something went wrong — please send it again."
+    _reply(reply)
+
+
 def _process_update(update: dict[str, Any]) -> None:
     if "callback_query" in update:
         _handle_callback_query(update["callback_query"])
-    # Plain text messages (slash commands) are out of scope for this prototype.
+    elif "message" in update:
+        _handle_message(update["message"])
 
 
 def _get_offset() -> Optional[int]:

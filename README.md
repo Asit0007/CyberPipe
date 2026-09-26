@@ -102,6 +102,10 @@ sources actually read), so you approve what you've read, not a summary.
 | `CONTENTPIPE_BASE_URL` | No | Defaults to `http://localhost:3000`. |
 | `CONTENTPIPE_TIMEOUT_SECONDS` | No | Per-request timeout for research/plan, defaults to 180. |
 | `CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS` | No | Defaults to 1800 (30 min) — `/api/script` makes many sequential LLM calls internally for a long-form script. |
+| `CONTENTRENDER_DIR` | No | Where ContentRender is checked out. Defaults to `../ContentRender`. Stages 4-6 run its command line there. |
+| `CONTENTRENDER_NODE` | No | Absolute path of `node` (launchd has no PATH). Defaults to the `node` on PATH. |
+| `CONTENTRENDER_STEP_BUDGET_SECONDS` / `CONTENTRENDER_TIMEOUT_SECONDS` | No | Seconds of work one call may start (1200) / the ceiling on one call (budget + 900). |
+| `BRIEFS_DIR` | No | Where the approved script is written for ContentRender. Defaults to `./data/briefs`. |
 | `DB_PATH` | No | Defaults to `pipeline.db` in this repo. |
 | `POLL_INTERVAL_SECONDS` | No | Scheduler tick interval, defaults to 60. |
 | `NEEDS_INPUT_TIMEOUT_HOURS` | No | A job waiting on your tap fails after this long, defaults to 72. |

@@ -68,3 +68,17 @@ class UpstreamUnavailable(Exception):
 class PermanentStageError(Exception):
     """Raise when retrying can never help (e.g. ContentPipe's `zero_quota`: the key has no quota
     and needs billing). worker.py fails the job immediately instead of burning every backoff attempt."""
+
+
+class StageInProgress(Exception):
+    """Raise when a stage made real progress but is not finished: ContentRender stops at its time budget
+    (or after a retryable failure) and reports how long to wait before the next call.
+
+    Not a failure, not a rate limit, and not a wait for anything external: worker.py re-queues the job
+    for `retry_at` without consuming an attempt, without paging anyone, and without starting the
+    MAX_WAIT_DAYS clock — each call moved the run forward, so it is not "stuck".
+    """
+
+    def __init__(self, message: str, retry_at: Optional[datetime] = None):
+        self.retry_at = retry_at
+        super().__init__(message)

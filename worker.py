@@ -19,12 +19,15 @@ from typing import Any, Callable, Optional
 import config
 import db
 import notifier
+import pipeline
 import rate_limiter
-from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, UpstreamUnavailable
+from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, StageInProgress, UpstreamUnavailable
 from pipeline import STAGE_FUNCTIONS, next_stage_after
 
 # Where a job goes when ContentPipe says the identical run is still in flight and gives no Retry-After.
 DEFAULT_BUSY_WAIT_SECONDS = 30
+# Between two calls of a multi-call stage (ContentRender stopped at its time budget) when it names no time.
+DEFAULT_PROGRESS_WAIT_SECONDS = 30
 
 # Cleared whenever a job leaves RUNNING, so a stale lock never lingers on a finished row.
 UNLOCK = {"locked_by": None, "locked_at": None}
@@ -95,6 +98,14 @@ def run_job(job_id: int) -> None:
         retry_at = exc.retry_at or datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_BUSY_WAIT_SECONDS)
         db.log_stage_run(job_id, stage, attempt, "busy", started_at, db.now_iso(), error=str(exc))
         _wait(job, retry_at, f"stage busy: {exc}")  # no attempt consumed, nobody paged
+        return
+
+    except StageInProgress as exc:
+        retry_at = exc.retry_at or datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_PROGRESS_WAIT_SECONDS)
+        db.log_stage_run(job_id, stage, attempt, "in_progress", started_at, db.now_iso(), error=str(exc))
+        # Real progress, not a wait: no attempt consumed, nobody paged, and the MAX_WAIT_DAYS clock is cleared.
+        db.transition(job_id, "RUNNING", status="SCHEDULED", attempt_count=0, next_retry_at=db.to_iso(retry_at),
+                      last_error=None, wait_since=None, **UNLOCK)
         return
 
     except UpstreamUnavailable as exc:
@@ -240,11 +251,17 @@ def resume_from_input(job_id: int, answer: str) -> bool:
             print(f"[worker] job #{job_id}: approve ignored — no stored draft to commit")
             return False
         outputs = job["stage_outputs"]
+        hook = pipeline.ON_APPROVE.get(job["current_stage"])
+        if hook is not None and not _run_hook(job_id, "approve", hook, job, outputs):
+            return False
         outputs[job["current_stage"]] = draft
         return _advance(job_id, job["current_stage"], outputs, from_status="NEEDS_INPUT",
                         pending_question=None, pending_payload=None)
 
     if answer == "regenerate":
+        hook = pipeline.ON_REGENERATE.get(job["current_stage"])
+        if hook is not None and not _run_hook(job_id, "regenerate", hook, job, job["stage_outputs"]):
+            return False
         # Forget the approval announcement too: its dedupe key is otherwise identical for the next
         # draft, which would then never be sent.
         return db.transition(job_id, "NEEDS_INPUT", clear_notified_prefix="needs_input:",
@@ -252,3 +269,37 @@ def resume_from_input(job_id: int, answer: str) -> bool:
 
     print(f"[worker] job #{job_id}: unrecognized answer {answer!r}, ignoring")
     return False
+
+
+def _run_hook(job_id: int, what: str, hook: Callable[[dict[str, Any], dict[str, Any]], None], job: dict[str, Any], outputs: dict[str, Any]) -> bool:
+    """A human decision that ContentRender must also hear. If it cannot be delivered the job stays exactly where it
+    is, still waiting, so tapping the same button again retries — nothing is half-applied."""
+    try:
+        hook(job, outputs)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[worker] job #{job_id}: {what} could not reach ContentRender, job left waiting: {notifier.redact_secrets(str(exc))}")
+        return False
+
+
+REGEN_KINDS = {"images": "still", "narration": "narration"}
+
+
+def regenerate_scenes(job_id: int, scenes: list[int]) -> tuple[bool, str]:
+    """Telegram `/regen <job> <scene numbers>`: redo just those scenes at the images or narration checkpoint, then
+    run the stage again. Returns (applied, message for the human)."""
+    job = db.get_job(job_id)
+    if job is None:
+        return False, f"No job #{job_id}."
+    kind = REGEN_KINDS.get(job["current_stage"])
+    if job["status"] != "NEEDS_INPUT" or kind is None:
+        return False, f"Job #{job_id} is not waiting at an images or narration checkpoint."
+    try:
+        pipeline.regenerate_scenes(job, job["stage_outputs"], kind, scenes)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[worker] job #{job_id}: /regen failed: {notifier.redact_secrets(str(exc))}")
+        return False, f"ContentRender refused: {notifier.redact_secrets(str(exc))[:300]}"
+    applied = db.transition(job_id, "NEEDS_INPUT", clear_notified_prefix="needs_input:",
+                            status="PENDING", pending_question=None, pending_payload=None, attempt_count=0)
+    label = "stills" if kind == "still" else "narration"
+    return applied, f"Redoing {label} for scene{'s' if len(scenes) != 1 else ''} {', '.join(str(n) for n in scenes)} on job #{job_id}." if applied else f"Job #{job_id} changed while I was working; nothing was applied."
