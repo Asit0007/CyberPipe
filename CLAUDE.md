@@ -154,7 +154,7 @@ back (Telegram document reply vs. re-ingest through ContentPipe).
 | 3. Script | Built — calls ContentPipe `/api/script`, raises the mandatory human checkpoint |
 | 4. `images` — stills | **Built (2026-09-26)** — runs ContentRender's CLI; gate: the stills as Telegram albums. |
 | 5. `narration` — AI clips + two-voice narration | **Built** — same CLI; gate: one MP3 of the whole narration. Kokoro is local, Charon goes through ContentPipe. |
-| 6. `bundle` — the DaVinci Resolve bundle | **Built** — FCPXML timeline, captions, rough-cut MP4 under `ContentRender/.render/runs/job-<id>/resolve/`; gate: the rough cut. Approve → COMPLETED. Verified end to end on **stub media** (tests/test_e2e_contentrender.py); not yet on a real story, and the timeline is not yet proven to import cleanly into Resolve. |
+| 6. `bundle` — the DaVinci Resolve bundle | **Built** — FCPXML timeline, captions, rough-cut MP4 under `ContentRender/output/runs/job-<id>/resolve/`; gate: the rough cut. Approve → COMPLETED. Verified end to end on **stub media** (tests/test_e2e_contentrender.py); not yet on a real story, and the timeline is not yet proven to import cleanly into Resolve. |
 | Telegram `/status /jobs /retry ...` dashboard (Prompt 5) | **Not started.** `telegram_poller.py` only handles the `job:<id>:<answer>` approve/regenerate buttons. |
 | Analytics feedback loop (Prompt 7) | **Not started.** Needs YouTube Data + Analytics OAuth. |
 

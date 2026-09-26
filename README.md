@@ -29,8 +29,8 @@ python3 -m venv venv
 cp .env.example .env
 ```
 
-`ContentPipe` must be running separately for stages 1-3 to have something
-to call:
+`ContentPipe` must be running separately for stages 1-3 (and for the images, clips
+and analyst voice of stages 4-5) to have something to call:
 
 ```bash
 cd ../ContentPipe && npm run dev   # http://localhost:3000
@@ -144,13 +144,13 @@ behaviour, and what the request bodies sent to ContentPipe actually contain. See
 | 2. Plan | Built — calls ContentPipe `/api/plan`, including target video duration |
 | 3. Script | Built — calls ContentPipe `/api/script`, mandatory Telegram approve/regenerate checkpoint; the approval message includes ContentPipe's audit findings (runtime shortfall, unsourced figures, mid-roll eligibility) and attaches the full draft |
 | Edit / upload a revised script | Not built — approve still commits the LLM draft as-is; the spec's "human rewrite is mandatory" needs a decision on how a revised script comes back |
-| 4. Image/video generation | Not started here. ContentPipe's `/api/tts` and `/api/generate-image` already honor strict mode, so they are ready to be called; what is missing is a stage that generates and checkpoints every scene's audio and still (~51 TTS calls for a 585 s script, free-tier TTS quota unmeasured) |
-| 5. FFmpeg/Remotion assembly | Built in ContentPipe (`server/assemble.ts` + sidecar SRT captions, proven on a stub render), but only as a module and script. CyberPipe does not call it yet, and nothing generates per-scene TTS and images to feed it |
+| 4. `images` — stills | Built (2026-09-26) — runs [ContentRender](../ContentRender)'s command line; gate: the stills as Telegram albums; `/regen <job> 3,7` redoes single scenes |
+| 5. `narration` — AI clips + two-voice narration | Built — same CLI; Kokoro narrates locally, Charon (via ContentPipe) reads the analyst lines; gate: one MP3. A clip that cannot be made becomes a Ken Burns fallback and never blocks the video |
+| 6. `bundle` — the DaVinci Resolve bundle | Built — FCPXML timeline, captions, rough-cut MP4; gate: the rough cut; approve → `COMPLETED`. Verified end to end on stub media and, for the media stages, once on real quota; the FCPXML imports into Resolve 18.6 (owner, 2026-09-27). Not yet run on a real story through Telegram |
 | Telegram `/status /jobs /retry ...` dashboard | Not started — only the approve/regenerate buttons work today |
 | Post-publish analytics feedback loop | Not started — needs YouTube Data + Analytics OAuth |
 
-A `COMPLETED` job today means "script approved" — there's no stage after
-`script` yet. Full gap analysis against the original spec, including two
+A `COMPLETED` job now means the Resolve bundle was approved (stages 4-6 above). Full gap analysis against the original spec, including two
 operational constraints discovered while testing (a real Gemini schema
 limit, and Gemini's 20-requests/day/model free-tier cap — which ContentPipe's
 provider chain now spreads across DeepSeek / Grok / free tiers once their keys
