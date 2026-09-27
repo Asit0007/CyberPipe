@@ -138,6 +138,17 @@ behaviour, and what the request bodies sent to ContentPipe actually contain. See
 
 ---
 
+## Planned (2026-09-27): the story cycle
+
+Not built yet; checklist in `../plan-story-cycle.md`. The owner's workflow: submit one story; CyberPipe runs research →
+plan → script → images → narration → clips → bundle; when the day's free video quota runs out, the clips stage
+**pauses** (Telegram: how many clips are made, which are waiting, where to drop hand-made ones) and **resumes at 8 AM**;
+the cycle ends at the approved Resolve bundle. Planned pieces: a clips-pause state that waits days without the
+`MAX_WAIT_DAYS` cap and pages once per day; Telegram `/resume <job>`, `/finish <job>` (Ken Burns for the rest) and
+`/status`; one story at a time in `submit_job.py`; gate timeout 72 h → 168 h; a deterministic video id
+(`<created-date>-<title-slug>-<job>`); a new "Blast Radius" Telegram bot; LaunchAgents for the scheduler, poller and
+ContentPipe.
+
 ## Current status
 
 | Stage | Status |
