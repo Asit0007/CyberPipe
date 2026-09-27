@@ -92,6 +92,8 @@ sources actually read), so you approve what you've read, not a summary.
 
 ---
 
+Which component calls which model, and when, across CyberPipe → ContentPipe → ContentRender: see the call tree in [`../ContentPipe/README.md`](https://github.com/Asit0007/ContentPipe#how-the-calls-are-divided) ("How the calls are divided").
+
 ## Environment
 
 | Variable | Required | Purpose |
@@ -100,7 +102,7 @@ sources actually read), so you approve what you've read, not a summary.
 | `TELEGRAM_CHAT_ID` | No | Only this chat is authorized to resume a job. |
 | `CHANNEL_BRAND_NAME` | No | The show name ContentPipe writes into scripts when a job doesn't carry its own. Defaults to `Blast Radius`, matching ContentPipe's `DEFAULT_CHANNEL_BRAND`. Never set this to the name of this tool — it ends up spoken on camera. |
 | `CONTENTPIPE_BASE_URL` | No | Defaults to `http://localhost:3000`. |
-| `CONTENTPIPE_TIMEOUT_SECONDS` | No | Per-request timeout for research/plan, defaults to 180. |
+| `CONTENTPIPE_TIMEOUT_SECONDS` | No | Per-request timeout for research/plan, defaults to 600 (was 180, shorter than one stalled model inside ContentPipe). |
 | `CONTENTPIPE_SCRIPT_TIMEOUT_SECONDS` | No | Defaults to 1800 (30 min) — `/api/script` makes many sequential LLM calls internally for a long-form script. |
 | `CONTENTRENDER_DIR` | No | Where ContentRender is checked out. Defaults to `../ContentRender`. Stages 4-6 run its command line there. |
 | `CONTENTRENDER_NODE` | No | Absolute path of `node` (launchd has no PATH). Defaults to the `node` on PATH. |

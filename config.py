@@ -38,7 +38,12 @@ CHANNEL_BRAND_NAME = os.environ.get("CHANNEL_BRAND_NAME", "Blast Radius")
 
 # --- ContentPipe (stages 1-3 call its API rather than reimplementing it) ---
 CONTENTPIPE_BASE_URL = os.environ.get("CONTENTPIPE_BASE_URL", "http://localhost:3000")
-CONTENTPIPE_TIMEOUT_SECONDS = int(os.environ.get("CONTENTPIPE_TIMEOUT_SECONDS", "180"))
+# /api/research and /api/plan. 180 s was shorter than one worst case: ContentPipe gives each Gemini
+# call 180 s (GEMINI_TIMEOUT_MS, 2026-09-27) and every other provider 120 s, and its model order starts
+# with two Gemini models, so one stalled model could spend the whole wait. A client timeout then spent a
+# backoff attempt here while ContentPipe finished the plan anyway and threw it away (neither endpoint is
+# journaled, unlike /api/script). A background job loses nothing to a long ceiling.
+CONTENTPIPE_TIMEOUT_SECONDS = int(os.environ.get("CONTENTPIPE_TIMEOUT_SECONDS", "600"))
 # /api/script now makes many sequential LLM calls internally (one per
 # narrative/visual-direction chunk — see ContentPipe's CLAUDE.md) rather than
 # 2-3. Measured live 2026-09-19 under a free-tier quota crunch: individual
