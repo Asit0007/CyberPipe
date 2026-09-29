@@ -171,6 +171,7 @@ class DriveTests(RenderTestCase):
             self.drive("bundle", {"status": "rate_limited", "provider": "contentpipe:video", "kind": "quota", "retryAfterSec": 72000, "retryAt": at, "message": "quota exhausted", "pause": "clips", "clips": summary})
         self.assertAlmostEqual((cm.exception.retry_at - datetime.now(timezone.utc)).total_seconds(), 72000, delta=5)
         self.assertEqual(cm.exception.summary, summary)
+        self.assertEqual(cm.exception.provider, "contentpipe:video", "the real provider from the outcome, not a hardcoded string")
 
     def test_a_clips_pause_wins_even_when_its_kind_is_overloaded_not_quota(self):
         # ZeroGPU mostly hides quota exhaustion behind a generic overloaded refusal (see ContentRender's
@@ -349,6 +350,24 @@ class ClipsPauseTests(RenderTestCase):
         self.assertIsNone(job["wait_since"], "MAX_WAIT_DAYS never applies to a clips pause — ContentRender's own 3-day give-up does")
         self.assertEqual(self.stage_status(job_id), ["clips_paused"])
 
+    def test_the_stage_run_logs_the_real_provider_contentrender_reported(self):
+        job_id = self.job_at("bundle")
+        self.render.step_outcomes.append(self.pause_outcome(provider="huggingface:wan2-2"))
+        worker.run_job(job_id)
+        with db.get_connection() as conn:
+            provider = conn.execute("SELECT provider FROM stage_runs WHERE job_id = ?", (job_id,)).fetchone()[0]
+        self.assertEqual(provider, "huggingface:wan2-2", "not a hardcoded placeholder")
+
+    def test_a_pause_with_no_retryAt_waits_an_hour_not_thirty_seconds(self):
+        # DEFAULT_PROGRESS_WAIT_SECONDS (30s) is StageInProgress's constant, for a multi-call stage that just ran
+        # out of time budget. Reusing it here would re-poll a resource ContentRender just said is out for the day.
+        job_id = self.job_at("bundle")
+        self.render.step_outcomes.append(self.pause_outcome(retryAt=None))
+        worker.run_job(job_id)
+        job = db.get_job(job_id)
+        wait = (datetime.fromisoformat(job["next_retry_at"].replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds()
+        self.assertGreater(wait, 300, "at least on the order of an hour, not 30s")
+
     def test_the_notification_names_the_clip_status_and_how_to_resume(self):
         job_id = self.job_at("bundle")
         self.render.step_outcomes.append(self.pause_outcome())
@@ -371,20 +390,23 @@ class ClipsPauseTests(RenderTestCase):
         self.assertEqual(db.get_job(job_id)["status"], "SCHEDULED")
 
     def test_only_one_notification_per_pause_date_even_across_several_runs(self):
+        # Keyed on the day the pause was DETECTED (db.now_iso), not the day it is due to resume (retryAt) — a
+        # pause near midnight with an hours-long wait can have a retryAt on a later calendar day than "now".
         job_id = self.job_at("bundle")
-        same_day = self.pause_outcome(retryAt="2030-06-01T05:00:00.000Z")
-        self.render.step_outcomes.append(dict(same_day))
-        worker.run_job(job_id)
-        self.set_raw(job_id, next_retry_at=self.ago(seconds=1))
-        self.render.step_outcomes.append(dict(same_day))
-        worker.run_job(job_id)
-        self.assertEqual(len(self.telegram.of("sendMessage")), 1, "same calendar day: only the first pause is announced")
+        with mock.patch.object(db, "now_iso", return_value="2030-06-01T09:00:00.000000+00:00"):
+            self.render.step_outcomes.append(self.pause_outcome(retryAt="2030-06-01T22:00:00.000Z"))
+            worker.run_job(job_id)
+            self.set_raw(job_id, next_retry_at=self.ago(seconds=1))
+            # A later pause the same detected day, even with a retryAt that has rolled into the next day.
+            self.render.step_outcomes.append(self.pause_outcome(retryAt="2030-06-02T01:00:00.000Z"))
+            worker.run_job(job_id)
+        self.assertEqual(len(self.telegram.of("sendMessage")), 1, "same detected day: only the first pause is announced")
 
-        next_day = self.pause_outcome(retryAt="2030-06-02T05:00:00.000Z")
         self.set_raw(job_id, next_retry_at=self.ago(seconds=1))
-        self.render.step_outcomes.append(dict(next_day))
-        worker.run_job(job_id)
-        self.assertEqual(len(self.telegram.of("sendMessage")), 2, "a new calendar day gets its own message")
+        with mock.patch.object(db, "now_iso", return_value="2030-06-02T09:00:00.000000+00:00"):
+            self.render.step_outcomes.append(self.pause_outcome(retryAt="2030-06-02T10:00:00.000Z"))
+            worker.run_job(job_id)
+        self.assertEqual(len(self.telegram.of("sendMessage")), 2, "a new detected day gets its own message")
 
     def test_resume_now_wakes_a_scheduled_job_immediately(self):
         job_id = self.job_at("bundle", status="SCHEDULED", next_retry_at=self.ahead(hours=5))
@@ -436,6 +458,16 @@ class ResumeCommandTests(RenderTestCase):
         self.assertEqual(self.telegram.calls, [])
         self.assertEqual(db.get_job(job_id)["status"], "SCHEDULED")
         self.assertGreater(db.get_job(job_id)["next_retry_at"], db.now_iso())
+
+    def test_an_autocapitalized_command_still_reaches_the_parser(self):
+        # The dispatch gate in _handle_message used to be a plain startswith("/resume") (case-sensitive), which
+        # disagreed with parse_resume's own case-insensitive match — a phone keyboard's "/Resume 12" matched
+        # neither the old gate nor got a reply, even though parse_resume("/Resume 12") would have accepted it.
+        job_id = self.job_at("bundle", status="SCHEDULED", next_retry_at=self.ahead(hours=5))
+        telegram_poller._process_update(self.message(f"/RESUME {job_id}"))
+        self.assertEqual(db.get_job(job_id)["status"], "SCHEDULED")
+        self.assertLessEqual(db.get_job(job_id)["next_retry_at"], db.now_iso())
+        self.assertIn(f"#{job_id}", self.replies()[-1])
 
 
 class MediaNotificationTests(RenderTestCase):

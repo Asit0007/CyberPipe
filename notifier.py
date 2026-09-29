@@ -255,7 +255,15 @@ def notify_upstream_unavailable(job: dict[str, Any], waited_sec: float) -> bool:
 def notify_clips_paused(job: dict[str, Any], summary: dict[str, Any], retry_at_iso: str) -> bool:
     """One message per calendar day a job pauses on the free video-clip quota. Clips run after narration is
     approved (2026-09-29), so this can repeat day after day on the same job while nothing else is at risk;
-    a human only needs to hear about it once a day, not on every re-poll worker.py's ClipsPaused handler makes."""
+    a human only needs to hear about it once a day, not on every re-poll worker.py's ClipsPaused handler makes.
+
+    Keyed on the day the pause was DETECTED (`db.now_iso()`), not the day it is due to resume: `retry_at_iso`
+    can land on a later calendar day than "now" (a pause near midnight with an hours-long wait, or the ~24h
+    ZeroGPU window), and two genuinely different pauses can both resolve to the same resume-day key — the first
+    would then silently swallow the second. `wait_since` isn't available for this (ClipsPaused always clears it,
+    so `MAX_WAIT_DAYS` never applies to it), which is why this needs its own key rather than the
+    notify_rate_limited/notify_upstream_unavailable episode-keying idiom.
+    """
     made, provided = summary.get("made", 0), summary.get("provided", 0)
     waiting, fallback = summary.get("waiting", 0), summary.get("fallback", 0)
     text = (
@@ -265,7 +273,7 @@ def notify_clips_paused(job: dict[str, Any], summary: dict[str, Any], retry_at_i
         f"(see {summary.get('list', 'waiting-clips.md')} for which scene each slot needs) — it is picked up automatically.\n"
         f"Resuming on its own around {retry_at_iso}. To resume the moment you've dropped clips in, send /resume {job['id']}."
     )
-    day = (retry_at_iso or db.now_iso())[:10]
+    day = db.now_iso()[:10]
     return _notify_once(job["id"], f"clips_paused:{job['current_stage']}:{day}", text)
 
 

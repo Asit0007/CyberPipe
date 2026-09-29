@@ -172,15 +172,26 @@ process crashed (→ ordinary backoff). ContentRender keeps its own per-asset ma
 |---|---|
 | `progress` (time budget used, or a retryable failure) | `StageInProgress` — re-queued at `retryInSec`, **no attempt, no page, `wait_since` cleared** (each call moved the run forward) |
 | `gate` (the one this stage expects) | `HumanInputRequired`, payload `{gate, review}`; the notifier sends the review files |
-| `rate_limited` | `RateLimitError` (quota) / `UpstreamUnavailable` (overloaded), with ContentRender's own retry time |
+| `rate_limited` with `pause: 'clips'` | `ClipsPaused` (2026-09-29) — checked **before** the row below; the free video-clip quota is spent or looks that way. `worker.py` schedules it like `progress` (no attempt, `wait_since` cleared, so `MAX_WAIT_DAYS` never applies) and pages once a day; `/resume <job>` wakes it early. See "Clips pause" below. |
+| `rate_limited` (otherwise) | `RateLimitError` (quota) / `UpstreamUnavailable` (overloaded), with ContentRender's own retry time |
 | `error` | `PermanentStageError` — a human has to fix something (e.g. a scene gave up after 3 attempts) |
 | a gate the stage did not expect | `PermanentStageError`, never a silent approval |
+
+**Clips pause (2026-09-29).** ContentRender's clips stage now runs after narration is approved and pauses the whole
+`bundle` stage — instead of degrading to Ken Burns — when the free ZeroGPU clip supply looks spent; full rule in
+ContentRender's `CLAUDE.md` rule 8 and `src/stages/clips.ts`. `pipeline._drive` raises `ClipsPaused` (`exceptions.py`)
+with the `retryAt` and a clip-status summary (`clips: {made, provided, waiting, fallback, dropFolder, list}`).
+`notifier.notify_clips_paused` sends one Telegram message per calendar day paused, naming the clip counts and where
+to drop a hand-made clip. After 3 days with nothing resolving, ContentRender itself gives up and delivers with Ken
+Burns fallbacks — this job's own `MAX_WAIT_DAYS`/backoff never fires for a clips pause, by design.
 
 Human decisions reach ContentRender's manifest: each stage first runs `approve --gate <previous>` (idempotent, so a crash between the
 Telegram tap and the manifest cannot desync them); the final approval and every regenerate go through
 `pipeline.ON_APPROVE` / `ON_REGENERATE`, called by `worker.resume_from_input` **before** it moves the job — a hook that fails leaves
 the job waiting, so repeating the tap retries. `/regen <job> <scenes>` (telegram_poller) redoes just those scenes at the images or
-narration gate (`worker.regenerate_scenes`). The notifier sends stills as `sendMediaGroup` albums of ≤10 (a lone one as `sendPhoto`),
+narration gate (`worker.regenerate_scenes`); `/resume <job>` (2026-09-29, `worker.resume_now`) wakes any `SCHEDULED` job
+at once instead of at its `next_retry_at` — a plain DB nudge, not clips-specific, meant for "I've already dropped the
+clip in." The notifier sends stills as `sendMediaGroup` albums of ≤10 (a lone one as `sendPhoto`),
 the narration as `sendAudio`, the rough cut as `sendVideo` (only if ≤ 48 MB); anything it could not attach is named in the approval
 message so nobody approves blind.
 

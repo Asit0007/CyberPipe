@@ -97,7 +97,8 @@ class ClipsPaused(Exception):
     has its own 3-day give-up (`GIVE_UP_MS` in `stages/clips.ts`) that turns the wait into a delivered video.
     """
 
-    def __init__(self, retry_at: Optional[datetime], summary: dict[str, Any], message: str = ""):
+    def __init__(self, retry_at: Optional[datetime], summary: dict[str, Any], message: str = "", provider: str = "contentrender:video"):
         self.retry_at = retry_at
         self.summary = summary
+        self.provider = provider
         super().__init__(message or "clips paused")

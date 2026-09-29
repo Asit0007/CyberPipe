@@ -419,7 +419,7 @@ def _drive(job: dict[str, Any], outputs: dict[str, Any], stage: str) -> dict[str
         retry_at = _parse_iso(outcome.get("retryAt"))
         provider = outcome.get("provider", "contentrender")
         if outcome.get("pause") == "clips":
-            raise ClipsPaused(retry_at, outcome.get("clips") or {}, message=outcome.get("message", ""))
+            raise ClipsPaused(retry_at, outcome.get("clips") or {}, message=outcome.get("message", ""), provider=provider)
         if outcome.get("kind") == "overloaded":
             raise UpstreamUnavailable(provider, retry_at=retry_at, message=outcome.get("message", ""))
         raise RateLimitError(provider, retry_at=retry_at, message=outcome.get("message", ""))

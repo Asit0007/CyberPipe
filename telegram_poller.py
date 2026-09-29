@@ -136,13 +136,18 @@ def parse_resume(text: str) -> Optional[int]:
 
 def _handle_message(message: dict[str, Any]) -> None:
     text = (message.get("text") or "").strip()
-    if not (text.startswith("/regen") or text.startswith("/resume")):
+    parts = text.split()
+    # Case-insensitive, and strips a bot-mention suffix ("/resume@my_bot") — matching what parse_regen/parse_resume
+    # already normalize downstream. A bare startswith("/regen") gate here used to disagree with them (a phone
+    # keyboard's autocapitalized "/Resume 12" would match neither prefix and be silently dropped before parsing).
+    cmd = parts[0].split("@")[0].lower() if parts else ""
+    if cmd not in ("/regen", "/resume"):
         return  # the rest of the slash-command dashboard (/status, /jobs, ...) is a later phase
     if not _is_authorized(message.get("from", {})):
-        print(f"[telegram_poller] ignoring {text.split()[0] if text.split() else 'a command'} from unauthorized chat {message.get('from', {}).get('id')}")
+        print(f"[telegram_poller] ignoring {cmd} from unauthorized chat {message.get('from', {}).get('id')}")
         return
 
-    if text.startswith("/resume"):
+    if cmd == "/resume":
         job_id = parse_resume(text)
         if job_id is None:
             _reply(RESUME_USAGE)

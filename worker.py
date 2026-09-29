@@ -28,6 +28,11 @@ from pipeline import STAGE_FUNCTIONS, next_stage_after
 DEFAULT_BUSY_WAIT_SECONDS = 30
 # Between two calls of a multi-call stage (ContentRender stopped at its time budget) when it names no time.
 DEFAULT_PROGRESS_WAIT_SECONDS = 30
+# Same "no time given" fallback, but for a clips pause specifically: ContentRender's own default there is an hourly
+# probe (PROBE_AGAIN_MS in stages/clips.ts), never a 30 s one — reusing DEFAULT_PROGRESS_WAIT_SECONDS here would
+# re-poll a resource ContentRender just said was out for the day, every 30 s, with no escalation (attempt_count and
+# wait_since are both reset on a clips pause, so nothing else would slow it down).
+DEFAULT_CLIPS_PAUSE_WAIT_SECONDS = 3600
 
 # Cleared whenever a job leaves RUNNING, so a stale lock never lingers on a finished row.
 UNLOCK = {"locked_by": None, "locked_at": None}
@@ -70,6 +75,15 @@ def notify_safely(fn: Callable[[dict[str, Any]], Any], job_id: int) -> None:
         print(f"[worker] job #{job_id}: {getattr(fn, '__name__', 'notification')} failed: {notifier.redact_secrets(str(exc))}")
 
 
+def _park_without_attempt(job_id: int, retry_at: datetime, last_error: Optional[str]) -> None:
+    """Re-queue a RUNNING job at `retry_at` as though nothing happened: no attempt consumed, nobody paged by this
+    call, and `wait_since` cleared so `MAX_WAIT_DAYS` never applies. Shared by `StageInProgress` (the stage made
+    real forward progress) and `ClipsPaused` (the stage is waiting on something that isn't this job's fault and
+    has its own give-up clock) — both mean "call me again later, this was not a failure or a wait"."""
+    db.transition(job_id, "RUNNING", status="SCHEDULED", attempt_count=0, next_retry_at=db.to_iso(retry_at),
+                  last_error=last_error, wait_since=None, **UNLOCK)
+
+
 # ------------------------------------------------------------------------------------ running a stage
 
 def run_job(job_id: int) -> None:
@@ -95,14 +109,13 @@ def run_job(job_id: int) -> None:
         return
 
     except ClipsPaused as exc:
-        retry_at = exc.retry_at or datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_PROGRESS_WAIT_SECONDS)
-        db.log_stage_run(job_id, stage, attempt, "clips_paused", started_at, db.now_iso(), provider="contentrender:video", error=str(exc))
+        retry_at = exc.retry_at or datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_CLIPS_PAUSE_WAIT_SECONDS)
+        db.log_stage_run(job_id, stage, attempt, "clips_paused", started_at, db.now_iso(), provider=exc.provider, error=str(exc))
         # Like StageInProgress: no attempt consumed, no page beyond notify_clips_paused's own throttling, and
         # wait_since is cleared — ContentRender's own 3-day give-up (GIVE_UP_MS in stages/clips.ts) is what turns
         # an endless pause into a delivered video, not this job's MAX_WAIT_DAYS clock. Clips now run after
         # narration is approved, so there is no other stage's work at risk while this waits.
-        db.transition(job_id, "RUNNING", status="SCHEDULED", attempt_count=0, next_retry_at=db.to_iso(retry_at),
-                      last_error=str(exc), wait_since=None, **UNLOCK)
+        _park_without_attempt(job_id, retry_at, str(exc))
         notify_safely(lambda j: notifier.notify_clips_paused(j, exc.summary, db.to_iso(retry_at)), job_id)
         return
 
@@ -116,8 +129,7 @@ def run_job(job_id: int) -> None:
         retry_at = exc.retry_at or datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_PROGRESS_WAIT_SECONDS)
         db.log_stage_run(job_id, stage, attempt, "in_progress", started_at, db.now_iso(), error=str(exc))
         # Real progress, not a wait: no attempt consumed, nobody paged, and the MAX_WAIT_DAYS clock is cleared.
-        db.transition(job_id, "RUNNING", status="SCHEDULED", attempt_count=0, next_retry_at=db.to_iso(retry_at),
-                      last_error=None, wait_since=None, **UNLOCK)
+        _park_without_attempt(job_id, retry_at, None)
         return
 
     except UpstreamUnavailable as exc:

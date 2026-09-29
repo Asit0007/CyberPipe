@@ -131,9 +131,9 @@ its own temporary SQLite file:
 ./venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
-155 tests covering the job state machine (retry dispatch, crash recovery, regenerate/approve,
-timeouts), Telegram delivery and the poller, how ContentPipe's status codes map onto worker
-behaviour, and what the request bodies sent to ContentPipe actually contain. See `CLAUDE.md`
+167 tests (as of 2026-09-29) covering the job state machine (retry dispatch, crash recovery, regenerate/approve,
+timeouts, the clips pause and `/resume`), Telegram delivery and the poller, how ContentPipe's status codes map onto
+worker behaviour, and what the request bodies sent to ContentPipe actually contain. See `CLAUDE.md`
 "Tier 1 audit fixes" for what each guards against.
 
 ---
