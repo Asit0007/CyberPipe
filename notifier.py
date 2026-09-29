@@ -252,6 +252,23 @@ def notify_upstream_unavailable(job: dict[str, Any], waited_sec: float) -> bool:
     return _notify_once(job["id"], f"unavailable:{job['current_stage']}:{episode}", text)
 
 
+def notify_clips_paused(job: dict[str, Any], summary: dict[str, Any], retry_at_iso: str) -> bool:
+    """One message per calendar day a job pauses on the free video-clip quota. Clips run after narration is
+    approved (2026-09-29), so this can repeat day after day on the same job while nothing else is at risk;
+    a human only needs to hear about it once a day, not on every re-poll worker.py's ClipsPaused handler makes."""
+    made, provided = summary.get("made", 0), summary.get("provided", 0)
+    waiting, fallback = summary.get("waiting", 0), summary.get("fallback", 0)
+    text = (
+        f"⏸️ Job #{job['id']} paused on the free video-clip quota (stage: {job['current_stage']})\n"
+        f"{made} AI clip(s) made, {provided} hand-made, {waiting} still waiting, {fallback} kept as a Ken Burns still.\n"
+        f"Drop a hand-made clip in the run's {summary.get('dropFolder', 'clips-in/')} folder "
+        f"(see {summary.get('list', 'waiting-clips.md')} for which scene each slot needs) — it is picked up automatically.\n"
+        f"Resuming on its own around {retry_at_iso}. To resume the moment you've dropped clips in, send /resume {job['id']}."
+    )
+    day = (retry_at_iso or db.now_iso())[:10]
+    return _notify_once(job["id"], f"clips_paused:{job['current_stage']}:{day}", text)
+
+
 def notify_completed(job: dict[str, Any]) -> bool:
     text = f"✅ Job #{job['id']} completed."
     bundle = ((job.get("stage_outputs") or {}).get("bundle") or {}).get("review") or {}

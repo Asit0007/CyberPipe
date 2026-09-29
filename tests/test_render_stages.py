@@ -22,7 +22,7 @@ import pipeline
 import review
 import telegram_poller
 import worker
-from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageInProgress, UpstreamUnavailable
+from exceptions import ClipsPaused, HumanInputRequired, PermanentStageError, RateLimitError, StageInProgress, UpstreamUnavailable
 from tests.support import DbTestCase, FakeResponse
 
 SCRIPT = {"title": "The Quiet Backdoor", "scenes": [{"id": "s1", "sceneNumber": 1, "narration": "n", "durationEst": 5, "visualPrompt": "p"}]}
@@ -163,6 +163,20 @@ class DriveTests(RenderTestCase):
     def test_overload_is_an_upstream_unavailable_wait_not_a_quota_wait(self):
         with self.assertRaises(UpstreamUnavailable):
             self.drive("narration", {"status": "rate_limited", "provider": "contentpipe:tts", "kind": "overloaded", "retryAfterSec": 30, "retryAt": "2030-01-01T00:00:00.000Z", "message": "busy"})
+
+    def test_a_clips_pause_is_its_own_kind_of_wait_carrying_the_clip_status_summary(self):
+        summary = {"made": 1, "provided": 0, "waiting": 2, "fallback": 0, "dropFolder": "clips-in/", "list": "waiting-clips.md"}
+        at = (datetime.now(timezone.utc) + timedelta(hours=20)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        with self.assertRaises(ClipsPaused) as cm:
+            self.drive("bundle", {"status": "rate_limited", "provider": "contentpipe:video", "kind": "quota", "retryAfterSec": 72000, "retryAt": at, "message": "quota exhausted", "pause": "clips", "clips": summary})
+        self.assertAlmostEqual((cm.exception.retry_at - datetime.now(timezone.utc)).total_seconds(), 72000, delta=5)
+        self.assertEqual(cm.exception.summary, summary)
+
+    def test_a_clips_pause_wins_even_when_its_kind_is_overloaded_not_quota(self):
+        # ZeroGPU mostly hides quota exhaustion behind a generic overloaded refusal (see ContentRender's
+        # stages/clips.ts), so `pause: 'clips'` must be read before the plain overloaded/quota branching below it.
+        with self.assertRaises(ClipsPaused):
+            self.drive("bundle", {"status": "rate_limited", "provider": "contentpipe:video", "kind": "overloaded", "retryAfterSec": 3600, "retryAt": "2030-01-01T00:00:00.000Z", "message": "pool at capacity", "pause": "clips", "clips": {}})
 
     def test_error_is_permanent_and_lists_every_problem(self):
         with self.assertRaises(PermanentStageError) as cm:
@@ -313,6 +327,115 @@ class WorkerFlowTests(RenderTestCase):
         self.assertFalse(ok)
         self.assertIn("refused", msg)
         self.assertEqual(db.get_job(job_id)["status"], "NEEDS_INPUT")
+
+
+class ClipsPauseTests(RenderTestCase):
+    """The whole pause/resume path: worker.run_job on a ClipsPaused outcome, and the manual `/resume` nudge."""
+
+    def pause_outcome(self, **over: Any) -> dict[str, Any]:
+        return {
+            "status": "rate_limited", "provider": "contentpipe:video", "kind": "overloaded",
+            "retryAfterSec": 3600, "retryAt": self.ahead(hours=1), "message": "pool at capacity",
+            "pause": "clips", "clips": {"made": 1, "provided": 0, "waiting": 2, "fallback": 0, "dropFolder": "clips-in/", "list": "waiting-clips.md"},
+            **over,
+        }
+
+    def test_a_clips_pause_schedules_the_job_without_an_attempt_or_starting_the_wait_clock(self):
+        job_id = self.job_at("bundle", wait_since=self.ago(days=2))
+        self.render.step_outcomes.append(self.pause_outcome())
+        worker.run_job(job_id)
+        job = db.get_job(job_id)
+        self.assertEqual((job["status"], job["attempt_count"]), ("SCHEDULED", 0))
+        self.assertIsNone(job["wait_since"], "MAX_WAIT_DAYS never applies to a clips pause — ContentRender's own 3-day give-up does")
+        self.assertEqual(self.stage_status(job_id), ["clips_paused"])
+
+    def test_the_notification_names_the_clip_status_and_how_to_resume(self):
+        job_id = self.job_at("bundle")
+        self.render.step_outcomes.append(self.pause_outcome())
+        worker.run_job(job_id)
+        text = self.telegram.messages[-1]["text"]
+        self.assertIn("1 AI clip(s) made", text)
+        self.assertIn("2 still waiting", text)
+        self.assertIn("clips-in/", text)
+        self.assertIn(f"/resume {job_id}", text)
+
+    def test_ten_consecutive_pauses_never_fail_the_job(self):
+        job_id = self.job_at("bundle")
+        for i in range(10):
+            self.render.step_outcomes.append(self.pause_outcome(clips={"made": i, "provided": 0, "waiting": 1, "fallback": 0, "dropFolder": "clips-in/", "list": "waiting-clips.md"}))
+            worker.run_job(job_id)
+            job = db.get_job(job_id)
+            self.assertEqual(job["status"], "SCHEDULED", f"pause #{i + 1} must not fail the job")
+            self.assertEqual(job["attempt_count"], 0)
+            self.set_raw(job_id, next_retry_at=self.ago(seconds=1))
+        self.assertEqual(db.get_job(job_id)["status"], "SCHEDULED")
+
+    def test_only_one_notification_per_pause_date_even_across_several_runs(self):
+        job_id = self.job_at("bundle")
+        same_day = self.pause_outcome(retryAt="2030-06-01T05:00:00.000Z")
+        self.render.step_outcomes.append(dict(same_day))
+        worker.run_job(job_id)
+        self.set_raw(job_id, next_retry_at=self.ago(seconds=1))
+        self.render.step_outcomes.append(dict(same_day))
+        worker.run_job(job_id)
+        self.assertEqual(len(self.telegram.of("sendMessage")), 1, "same calendar day: only the first pause is announced")
+
+        next_day = self.pause_outcome(retryAt="2030-06-02T05:00:00.000Z")
+        self.set_raw(job_id, next_retry_at=self.ago(seconds=1))
+        self.render.step_outcomes.append(dict(next_day))
+        worker.run_job(job_id)
+        self.assertEqual(len(self.telegram.of("sendMessage")), 2, "a new calendar day gets its own message")
+
+    def test_resume_now_wakes_a_scheduled_job_immediately(self):
+        job_id = self.job_at("bundle", status="SCHEDULED", next_retry_at=self.ahead(hours=5))
+        ok, msg = worker.resume_now(job_id)
+        self.assertTrue(ok)
+        self.assertIn(f"#{job_id}", msg)
+        job = db.get_job(job_id)
+        self.assertEqual(job["status"], "SCHEDULED")
+        self.assertLessEqual(job["next_retry_at"], db.now_iso())
+
+    def test_resume_now_is_ignored_off_a_scheduled_job_or_an_unknown_one(self):
+        running = self.job_at("bundle", status="RUNNING")
+        ok, msg = worker.resume_now(running)
+        self.assertFalse(ok)
+        self.assertIn("not waiting", msg)
+        ok, msg = worker.resume_now(999)
+        self.assertFalse(ok)
+        self.assertIn("No job", msg)
+
+
+class ResumeCommandTests(RenderTestCase):
+    def message(self, text: str, user_id: int = 42) -> dict[str, Any]:
+        return {"update_id": 1, "message": {"from": {"id": user_id}, "text": text}}
+
+    def replies(self) -> list[str]:
+        return [c["json"]["text"] for c in self.telegram.of("sendMessage")]
+
+    def test_parsing(self):
+        for text, want in [("/resume 12", 12), ("/resume #12", 12), ("/resume@my_bot 2", 2), ("/RESUME 1", 1)]:
+            self.assertEqual(telegram_poller.parse_resume(text), want, text)
+        for text in ["/resume", "/resume x", "/resume 12 3", "/resume 0", "/resume -1", "resume 12"]:
+            self.assertIsNone(telegram_poller.parse_resume(text), text)
+
+    def test_the_command_wakes_the_job_and_replies(self):
+        job_id = self.job_at("bundle", status="SCHEDULED", next_retry_at=self.ahead(hours=5))
+        telegram_poller._process_update(self.message(f"/resume {job_id}"))
+        self.assertEqual(db.get_job(job_id)["status"], "SCHEDULED")
+        self.assertLessEqual(db.get_job(job_id)["next_retry_at"], db.now_iso())
+        self.assertIn(f"#{job_id}", self.replies()[-1])
+
+    def test_a_malformed_command_gets_the_usage_line_and_changes_nothing(self):
+        telegram_poller._process_update(self.message("/resume banana"))
+        self.assertEqual(self.replies(), [telegram_poller.RESUME_USAGE])
+
+    def test_anyone_but_the_owner_is_ignored_silently(self):
+        job_id = self.job_at("bundle", status="SCHEDULED", next_retry_at=self.ahead(hours=5))
+        with self.captured_stdout():
+            telegram_poller._process_update(self.message(f"/resume {job_id}", user_id=666))
+        self.assertEqual(self.telegram.calls, [])
+        self.assertEqual(db.get_job(job_id)["status"], "SCHEDULED")
+        self.assertGreater(db.get_job(job_id)["next_retry_at"], db.now_iso())
 
 
 class MediaNotificationTests(RenderTestCase):

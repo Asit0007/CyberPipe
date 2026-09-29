@@ -21,7 +21,7 @@ import db
 import notifier
 import pipeline
 import rate_limiter
-from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, StageInProgress, UpstreamUnavailable
+from exceptions import ClipsPaused, HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, StageInProgress, UpstreamUnavailable
 from pipeline import STAGE_FUNCTIONS, next_stage_after
 
 # Where a job goes when ContentPipe says the identical run is still in flight and gives no Retry-After.
@@ -92,6 +92,18 @@ def run_job(job_id: int) -> None:
         db.log_stage_run(job_id, stage, attempt, "rate_limited", started_at, db.now_iso(), provider=exc.provider, error=str(exc))
         if _wait(job, retry_at, f"rate limited by {exc.provider}: {exc}"):
             notify_safely(lambda j: notifier.notify_rate_limited(j, exc.provider, db.to_iso(retry_at)), job_id)
+        return
+
+    except ClipsPaused as exc:
+        retry_at = exc.retry_at or datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_PROGRESS_WAIT_SECONDS)
+        db.log_stage_run(job_id, stage, attempt, "clips_paused", started_at, db.now_iso(), provider="contentrender:video", error=str(exc))
+        # Like StageInProgress: no attempt consumed, no page beyond notify_clips_paused's own throttling, and
+        # wait_since is cleared — ContentRender's own 3-day give-up (GIVE_UP_MS in stages/clips.ts) is what turns
+        # an endless pause into a delivered video, not this job's MAX_WAIT_DAYS clock. Clips now run after
+        # narration is approved, so there is no other stage's work at risk while this waits.
+        db.transition(job_id, "RUNNING", status="SCHEDULED", attempt_count=0, next_retry_at=db.to_iso(retry_at),
+                      last_error=str(exc), wait_since=None, **UNLOCK)
+        notify_safely(lambda j: notifier.notify_clips_paused(j, exc.summary, db.to_iso(retry_at)), job_id)
         return
 
     except StageBusy as exc:
@@ -283,6 +295,21 @@ def _run_hook(job_id: int, what: str, hook: Callable[[dict[str, Any], dict[str, 
 
 
 REGEN_KINDS = {"images": "still", "narration": "narration"}
+
+
+def resume_now(job_id: int) -> tuple[bool, str]:
+    """Telegram `/resume <job>`: wake a SCHEDULED job at once instead of at its `next_retry_at` — meant for a
+    job paused on the free clip supply (ClipsPaused) once a hand-made clip has been dropped in, but works on any
+    SCHEDULED wait. A DB transition only (`next_retry_at` moved to now); the scheduler's next poll does the rest,
+    so this can never race it. Ignored on a job that is not SCHEDULED: nothing to resume on a RUNNING job, and a
+    stale tap on one that already moved on."""
+    job = db.get_job(job_id)
+    if job is None:
+        return False, f"No job #{job_id}."
+    if job["status"] != "SCHEDULED":
+        return False, f"Job #{job_id} is not waiting to be resumed (status: {job['status']})."
+    applied = db.transition(job_id, "SCHEDULED", status="SCHEDULED", next_retry_at=db.now_iso())
+    return applied, f"Resuming job #{job_id} now." if applied else f"Job #{job_id} changed while I was working; nothing was applied."
 
 
 def regenerate_scenes(job_id: int, scenes: list[int]) -> tuple[bool, str]:

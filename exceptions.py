@@ -82,3 +82,22 @@ class StageInProgress(Exception):
     def __init__(self, message: str, retry_at: Optional[datetime] = None):
         self.retry_at = retry_at
         super().__init__(message)
+
+
+class ClipsPaused(Exception):
+    """Raise when ContentRender's `rate_limited` outcome carries `pause: 'clips'`: the free AI-clip supply
+    (ZeroGPU) is spent for the day, or looks that way, and ContentRender has paused the whole run rather
+    than falling back every remaining slot to a Ken Burns still — clips now run after narration is
+    approved, so there is no narration or images work left to lose by waiting a day.
+
+    Distinct from RateLimitError so worker.py can send a clips-specific notification (how many clips are
+    made, how many are waiting, where to drop a hand-made one) instead of the generic rate-limit message,
+    and so a day-after-day pause never fails the job: like StageInProgress, no attempt is consumed and
+    `wait_since` is cleared on every pause, so the `MAX_WAIT_DAYS` clock never applies to it — ContentRender
+    has its own 3-day give-up (`GIVE_UP_MS` in `stages/clips.ts`) that turns the wait into a delivered video.
+    """
+
+    def __init__(self, retry_at: Optional[datetime], summary: dict[str, Any], message: str = ""):
+        self.retry_at = retry_at
+        self.summary = summary
+        super().__init__(message or "clips paused")

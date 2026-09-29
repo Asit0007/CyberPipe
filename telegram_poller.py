@@ -119,13 +119,42 @@ def parse_regen(text: str) -> Optional[tuple[int, list[int]]]:
     return (job_id, scenes) if scenes and all(n > 0 for n in scenes) else None
 
 
+RESUME_USAGE = "Usage: /resume <job number>   e.g. /resume 12"
+
+
+def parse_resume(text: str) -> Optional[int]:
+    """`/resume 12` -> 12; None if it does not parse."""
+    parts = text.split()
+    if len(parts) != 2 or parts[0].split("@")[0].lower() != "/resume":
+        return None
+    try:
+        job_id = int(parts[1].lstrip("#"))
+    except ValueError:
+        return None
+    return job_id if job_id > 0 else None
+
+
 def _handle_message(message: dict[str, Any]) -> None:
     text = (message.get("text") or "").strip()
-    if not text.startswith("/regen"):
+    if not (text.startswith("/regen") or text.startswith("/resume")):
         return  # the rest of the slash-command dashboard (/status, /jobs, ...) is a later phase
     if not _is_authorized(message.get("from", {})):
-        print(f"[telegram_poller] ignoring /regen from unauthorized chat {message.get('from', {}).get('id')}")
+        print(f"[telegram_poller] ignoring {text.split()[0] if text.split() else 'a command'} from unauthorized chat {message.get('from', {}).get('id')}")
         return
+
+    if text.startswith("/resume"):
+        job_id = parse_resume(text)
+        if job_id is None:
+            _reply(RESUME_USAGE)
+            return
+        try:
+            _, reply = worker.resume_now(job_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[telegram_poller] job #{job_id}: /resume raised: {notifier.redact_secrets(str(exc))}")
+            reply = "Something went wrong — please send it again."
+        _reply(reply)
+        return
+
     parsed = parse_regen(text)
     if parsed is None:
         _reply(REGEN_USAGE)

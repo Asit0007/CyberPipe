@@ -58,7 +58,7 @@ import requests
 
 import config
 import rate_limiter
-from exceptions import HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, StageInProgress, UpstreamUnavailable
+from exceptions import ClipsPaused, HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, StageInProgress, UpstreamUnavailable
 
 PIPELINE_STAGES = ["research", "plan", "script", "images", "narration", "bundle"]
 
@@ -418,6 +418,8 @@ def _drive(job: dict[str, Any], outputs: dict[str, Any], stage: str) -> dict[str
     if status == "rate_limited":
         retry_at = _parse_iso(outcome.get("retryAt"))
         provider = outcome.get("provider", "contentrender")
+        if outcome.get("pause") == "clips":
+            raise ClipsPaused(retry_at, outcome.get("clips") or {}, message=outcome.get("message", ""))
         if outcome.get("kind") == "overloaded":
             raise UpstreamUnavailable(provider, retry_at=retry_at, message=outcome.get("message", ""))
         raise RateLimitError(provider, retry_at=retry_at, message=outcome.get("message", ""))
