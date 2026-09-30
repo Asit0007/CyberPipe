@@ -29,8 +29,9 @@ python3 -m venv venv
 cp .env.example .env
 ```
 
-`ContentPipe` must be running separately for stages 1-3 (and for the images, clips
-and analyst voice of stages 4-5) to have something to call:
+`ContentPipe` must be running separately for stages 1-3 (and for the images, analyst voice and clips
+of stages 4-6) to have something to call. On the owner's Mac a LaunchAgent (`com.asitminz.contentpipe`)
+already keeps it up on port 3000; anywhere else:
 
 ```bash
 cd ../ContentPipe && npm run dev   # http://localhost:3000
@@ -79,6 +80,7 @@ paths work.
 | ContentPipe returns 429 (quota) | Job is `SCHEDULED` for the `Retry-After` time, no attempt consumed. One ⏳ message per unbroken wait (plus one more if a short wait turns into a long one), not one per retry. Gives up after `MAX_WAIT_DAYS`. |
 | ContentPipe returns 409 (identical script still generating) | Waits and retries quietly — not counted as a failure. |
 | ContentPipe returns 503 (every model provider overloaded) | Job is `SCHEDULED` like a rate limit, no attempt consumed: first retry after its `Retry-After`, then a wait of half the outage's age up to `OVERLOAD_MAX_WAIT_SECONDS`. You get one message only if the outage lasts 15 minutes. Gives up after `MAX_WAIT_DAYS`. |
+| ContentRender pauses the clips step (the free video quota is spent) | Job is `SCHEDULED` until the quota is expected back, no attempt consumed and **no `MAX_WAIT_DAYS` limit**. One Telegram message per calendar day paused, saying which clips are waiting and where to drop hand-made ones. `/resume <job>` wakes it at once. ContentRender itself gives up after 3 days and finishes with Ken Burns stills. |
 | ContentPipe returns 502 `zero_quota` (key has no quota) | Fails immediately with a note to enable billing. |
 | Any other stage error | Backoff 5m / 15m / 45m / 2h / 6h, then `FAILED` after `MAX_STAGE_ATTEMPTS`. |
 | Scheduler killed or Mac restarted mid-stage | The job is re-queued on the next tick (counts as an attempt); ContentPipe resumes from its last finished chunk. |
@@ -131,23 +133,33 @@ its own temporary SQLite file:
 ./venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
-167 tests (as of 2026-09-29) covering the job state machine (retry dispatch, crash recovery, regenerate/approve,
+170 tests, 2 of them opt-in and skipped by default (run 2026-09-30), covering the job state machine (retry dispatch, crash recovery, regenerate/approve,
 timeouts, the clips pause and `/resume`), Telegram delivery and the poller, how ContentPipe's status codes map onto
 worker behaviour, and what the request bodies sent to ContentPipe actually contain. See `CLAUDE.md`
 "Tier 1 audit fixes" for what each guards against.
 
 ---
 
-## Planned (2026-09-27): the story cycle
+## The story cycle (built 2026-09-29; checklist in `../plan-story-cycle.md`)
 
-Not built yet; checklist in `../plan-story-cycle.md`. The owner's workflow: submit one story; CyberPipe runs research →
-plan → script → images → narration → clips → bundle; when the day's free video quota runs out, the clips stage
-**pauses** (Telegram: how many clips are made, which are waiting, where to drop hand-made ones) and **resumes at 8 AM**;
-the cycle ends at the approved Resolve bundle. Planned pieces: a clips-pause state that waits days without the
-`MAX_WAIT_DAYS` cap and pages once per day; Telegram `/resume <job>`, `/finish <job>` (Ken Burns for the rest) and
-`/status`; one story at a time in `submit_job.py`; gate timeout 72 h → 168 h; a deterministic video id
-(`<created-date>-<title-slug>-<job>`); a new "Blast Radius" Telegram bot; LaunchAgents for the scheduler, poller and
-ContentPipe.
+The owner's workflow: submit one story **by hand** (nothing starts on a schedule); CyberPipe runs research → plan →
+script → images → narration → clips → bundle; when the free video quota runs out, the clips step **pauses** and
+**resumes on its own when the quota is expected back** (there is no fixed time of day); the cycle ends at the approved
+Resolve bundle.
+
+- **Built:** the clips-pause state (waits days, outside `MAX_WAIT_DAYS`, one message per day) and Telegram
+  `/resume <job>`, which wakes any waiting job.
+- **Not built:** `/finish <job>` (Ken Burns for the rest), `/status`, one story at a time in `submit_job.py`, the gate
+  timeout change (72 h → 168 h), a deterministic video id (`<created-date>-<title-slug>-<job>`).
+- **Not done, owner only:** a new "Blast Radius" Telegram bot, and LaunchAgents for the scheduler and poller.
+
+**CyberPipe has never been installed or run a job** (2026-09-30): a `.env` exists, but there is no `pipeline.db`, no
+LaunchAgent and no bot. The first real story (OnePlus, 2026-09-30) is therefore being run by hand: ContentPipe's
+`npm run story:start` for the script, then ContentRender's command line for the media.
+
+**Next steps:** (1) finish that first story by hand; (2) owner creates the bot and fills `.env`; (3) build and install
+the launcher and the two LaunchAgents (see Deployment); (4) run the second story through CyberPipe and Telegram, which
+also closes `../plan-resolve-bundle.md`; (5) the "Not built" list above.
 
 ## Current status
 
@@ -158,9 +170,9 @@ ContentPipe.
 | 3. Script | Built — calls ContentPipe `/api/script`, mandatory Telegram approve/regenerate checkpoint; the approval message includes ContentPipe's audit findings (runtime shortfall, unsourced figures, mid-roll eligibility) and attaches the full draft |
 | Edit / upload a revised script | Not built — approve still commits the LLM draft as-is; the spec's "human rewrite is mandatory" needs a decision on how a revised script comes back |
 | 4. `images` — stills | Built (2026-09-26) — runs [ContentRender](../ContentRender)'s command line; gate: the stills as Telegram albums; `/regen <job> 3,7` redoes single scenes |
-| 5. `narration` — AI clips + two-voice narration | Built — same CLI; Kokoro narrates locally, Charon (via ContentPipe) reads the analyst lines; gate: one MP3. A clip that cannot be made becomes a Ken Burns fallback and never blocks the video |
-| 6. `bundle` — the DaVinci Resolve bundle | Built — FCPXML timeline, captions, rough-cut MP4; gate: the rough cut; approve → `COMPLETED`. Verified end to end on stub media and, for the media stages, once on real quota; the FCPXML imports into Resolve 18.6 (owner, 2026-09-27). Not yet run on a real story through Telegram |
-| Telegram `/status /jobs /retry ...` dashboard | Not started — only the approve/regenerate buttons work today |
+| 5. `narration` — two-voice narration | Built — same CLI; Kokoro narrates locally, Charon (via ContentPipe) reads the analyst lines; gate: one MP3 |
+| 6. `bundle` — AI clips, then the DaVinci Resolve bundle | Built — clips run here, after the narration gate (since 2026-09-29): a clip that cannot be made becomes a Ken Burns fallback, a spent free quota pauses the job (see the table above). Then the FCPXML timeline, captions, rough-cut MP4; gate: the rough cut; approve → `COMPLETED`. Verified end to end on stub media and, for the media stages, once on real quota; the FCPXML imports into Resolve 18.6 (owner, 2026-09-27). Not yet run on a real story through Telegram: CyberPipe has never been installed |
+| Telegram `/status /jobs /retry ...` dashboard | Not started — today the approve/regenerate buttons, `/regen <job> <scenes>` and `/resume <job>` work |
 | Post-publish analytics feedback loop | Not started — needs YouTube Data + Analytics OAuth |
 
 A `COMPLETED` job now means the Resolve bundle was approved (stages 4-6 above). Full gap analysis against the original spec, including two

@@ -63,8 +63,9 @@ submit_job.py ──> jobs table (PENDING) ──┐
                                           ──> worker.resume_from_input()
 ```
 
-`ContentPipe` must be running separately (`npm run dev` in that repo) for
-stages 1-3 — and, for images, clips and the analyst voice, stages 4-5 — to have something to call.
+`ContentPipe` must be running separately for stages 1-3 — and, for images, the analyst voice and clips,
+stages 4-6 — to have something to call. On the owner's Mac the `com.asitminz.contentpipe` LaunchAgent keeps
+it up on port 3000 (installed 2026-09-29); elsewhere `npm run dev` in that repo.
 
 ## Job state machine
 
@@ -153,9 +154,9 @@ back (Telegram document reply vs. re-ingest through ContentPipe).
 | 2. Plan | Built — calls ContentPipe `/api/plan` |
 | 3. Script | Built — calls ContentPipe `/api/script`, raises the mandatory human checkpoint |
 | 4. `images` — stills | **Built (2026-09-26)** — runs ContentRender's CLI; gate: the stills as Telegram albums. |
-| 5. `narration` — AI clips + two-voice narration | **Built** — same CLI; gate: one MP3 of the whole narration. Kokoro is local, Charon goes through ContentPipe. |
-| 6. `bundle` — the DaVinci Resolve bundle | **Built** — FCPXML timeline, captions, rough-cut MP4 under `ContentRender/output/runs/job-<id>/resolve/`; gate: the rough cut. Approve → COMPLETED. Verified end to end on **stub media** (tests/test_e2e_contentrender.py); not yet on a real story, and the timeline is not yet proven to import cleanly into Resolve. |
-| Telegram `/status /jobs /retry ...` dashboard (Prompt 5) | **Not started.** `telegram_poller.py` only handles the `job:<id>:<answer>` approve/regenerate buttons. |
+| 5. `narration` — two-voice narration (AI clips moved to stage 6, after this gate, 2026-09-29) | **Built** — same CLI; gate: one MP3 of the whole narration. Kokoro is local, Charon goes through ContentPipe. |
+| 6. `bundle` — the DaVinci Resolve bundle | **Built** — FCPXML timeline, captions, rough-cut MP4 under `ContentRender/output/runs/job-<id>/resolve/`; gate: the rough cut. Approve → COMPLETED. Verified end to end on **stub media** (tests/test_e2e_contentrender.py); the FCPXML imports into Resolve 18.6 (owner, 2026-09-27, test media). Not yet on a real story: **CyberPipe has never been installed or run a job** (a `.env` exists; no `pipeline.db`, no LaunchAgents, no bot, checked 2026-09-30). The first real story is being run by hand with ContentPipe's `story:start` and ContentRender's CLI, whose run folder is `output/runs/<videoId>/`, not `job-<id>`. |
+| Telegram `/status /jobs /retry ...` dashboard (Prompt 5) | **Not started.** `telegram_poller.py` handles the `job:<id>:<answer>` approve/regenerate buttons, `/regen <job> <scenes>` and `/resume <job>`; nothing else. |
 | Analytics feedback loop (Prompt 7) | **Not started.** Needs YouTube Data + Analytics OAuth. |
 
 A COMPLETED job now means the Resolve bundle was approved. `pipeline.PIPELINE_STAGES` is
@@ -234,7 +235,7 @@ below.
   warnings to the Telegram approval question, so a human sees "⚠️ no
   styleGuide" before approving rather than Stage 4 discovering it silently
   later. Doesn't recover the missing data, just surfaces it — there's
-  nothing to recover it *with* until Stage 4 exists.
+  nothing to recover it *with* (Stage 4 exists since 2026-09-26; it was not checked whether it notices a missing bible).
 - ~~No `VideoPlan.tone` value matches "authoritative, no fearmongering".~~
   **Fixed.** `planSchema.tone` is still a hard Gemini-enforced enum of 4
   literals — `"Deep Dive Documentary"` remains the closest match and
@@ -334,7 +335,10 @@ The original spec assumed a Linux VPS with systemd units. Decision: run on
 the same Mac as JobPipe/quant_bot instead, via launchd — no VPS provisioned
 or planned right now.
 
-**Same TCC problem as JobPipe, same fix.** CyberPipe lives under
+**Same TCC problem as JobPipe, same fix — written when the repo was under `~/Documents`.** It now lives at
+`~/Developer/My VSC projects/My Persona/AI Media/CyberPipe` (moved 2026-09-24 and 2026-09-28), which is not a
+TCC-guarded folder; whether the launcher is still needed there is untested, and `deploy/cyberpipe-launcher.c`
+and `scheduler.plist.example` still describe the old location. As written then: CyberPipe lives under
 `~/Documents` too, so a bare LaunchAgent calling `scheduler.py` or
 `bash run-service.sh` directly gets the identical exit-126 exec denial
 JobPipe measured 2026-09-10 — launchd holds no Documents-folder grant, only
