@@ -8,3 +8,6 @@ venv/
 .venv/
 data/
 
+
+# macOS
+.DS_Store

@@ -26,8 +26,11 @@ requests for minutes to days. ContentPipe's README has the side-by-side table.
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-cp .env.example .env
 ```
+
+Then create a `.env` in this folder (gitignored) with the variables you need from [Environment](#environment).
+None is required, so an empty `.env` runs; for real use set at least `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` and,
+under launchd, `CONTENTRENDER_NODE`. There is no `.env.example` (removed 2026-10-01): that table is the reference.
 
 `ContentPipe` must be running separately for stages 1-3 (and for the images, analyst voice and clips
 of stages 4-6) to have something to call. On the owner's Mac a LaunchAgent (`com.asitminz.contentpipe`)
@@ -116,7 +119,7 @@ Which component calls which model, and when, across CyberPipe → ContentPipe �
 | `MAX_STAGE_ATTEMPTS` | No | Ordinary failures before `FAILED`, defaults to 5. |
 | `MAX_WAIT_DAYS` | No | Give up on a job that has been continuously rate-limited, waiting on a busy ContentPipe, or waiting out a provider outage (503), defaults to 7. |
 | `OVERLOAD_MAX_WAIT_SECONDS` | No | Longest gap between re-polls of a ContentPipe whose providers are overloaded, defaults to 900. |
-| `RUNNING_LEASE_SECONDS` | No | A `RUNNING` job with no live worker is re-queued; this lease must exceed the longest stage. Defaults to the script timeout + 600. |
+| `RUNNING_LEASE_SECONDS` | No | A `RUNNING` job with no live worker is re-queued; this lease must exceed the longest stage. Defaults to the longer of the script and ContentRender timeouts, + 600. |
 | `TELEGRAM_RESEND_COOLDOWN_SECONDS` | No | Minimum gap before re-trying a Telegram message that failed to send, defaults to 300. |
 
 `.env` is gitignored and read once at process start — restart

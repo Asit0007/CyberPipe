@@ -196,7 +196,7 @@ clip in." The notifier sends stills as `sendMediaGroup` albums of ≤10 (a lone 
 the narration as `sendAudio`, the rough cut as `sendVideo` (only if ≤ 48 MB); anything it could not attach is named in the approval
 message so nobody approves blind.
 
-Config (`.env.example`): `CONTENTRENDER_DIR`, `CONTENTRENDER_NODE` (**absolute path** — launchd has no PATH),
+Config (README "Environment"; `.env.example` was removed 2026-10-01): `CONTENTRENDER_DIR`, `CONTENTRENDER_NODE` (**absolute path** — launchd has no PATH),
 `CONTENTRENDER_STEP_BUDGET_SECONDS` (1200), `CONTENTRENDER_TIMEOUT_SECONDS` (budget + 900), `BRIEFS_DIR`. `RUNNING_LEASE_SECONDS` now defaults to the
 longer of the script and ContentRender timeouts, plus 600. **ContentPipe must be running** for images, clips and Charon; Kokoro needs
 `npm run kokoro:setup` in ContentRender. Tests: `tests/test_render_stages.py` (fakes `_run_render`), and the opt-in
