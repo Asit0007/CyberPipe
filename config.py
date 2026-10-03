@@ -65,13 +65,21 @@ CONTENTRENDER_STEP_BUDGET_SECONDS = int(os.environ.get("CONTENTRENDER_STEP_BUDGE
 CONTENTRENDER_TIMEOUT_SECONDS = int(os.environ.get("CONTENTRENDER_TIMEOUT_SECONDS", str(CONTENTRENDER_STEP_BUDGET_SECONDS + 900)))
 # Where the approved script is written for ContentRender to read (one JSON file per job).
 BRIEFS_DIR = os.environ.get("BRIEFS_DIR", str(BASE_DIR / "data" / "briefs"))
+# Where ContentRender keeps its runs. Empty means its own default, <CONTENTRENDER_DIR>/<RENDER_DIR or "output">/runs
+# (its src/config.ts), worked out when needed by pipeline.runs_dir(). CyberPipe only reads that folder: to name a run in
+# messages and to tell an existing run from a new one.
+CONTENTRENDER_RUNS_DIR = os.environ.get("CONTENTRENDER_RUNS_DIR", "")
 
 # --- Persistence -------------------------------------------------------------
 DB_PATH = os.environ.get("DB_PATH", str(BASE_DIR / "pipeline.db"))
 
 # --- Scheduler ---------------------------------------------------------------
 POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "60"))
-NEEDS_INPUT_TIMEOUT_HOURS = int(os.environ.get("NEEDS_INPUT_TIMEOUT_HOURS", "72"))
+# A job waiting at a human gate fails after this long (measured from the last message sent about it). 168 h (a
+# week, owner 2026-10-03): a video takes days, and the owner may be away; 72 h failed real work too easily.
+NEEDS_INPUT_TIMEOUT_HOURS = int(os.environ.get("NEEDS_INPUT_TIMEOUT_HOURS", "168"))
+# One reminder is sent once a gate has waited this long without an answer (0 turns reminders off).
+NEEDS_INPUT_REMINDER_HOURS = int(os.environ.get("NEEDS_INPUT_REMINDER_HOURS", "24"))
 
 # --- Retry / backoff ----------------------------------------------------------
 # Generic per-stage failures (not rate limits): 5m, 15m, 45m, 2h, 6h — matches

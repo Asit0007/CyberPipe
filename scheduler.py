@@ -1,5 +1,6 @@
 """Polling loop: reclaims jobs whose worker died, dispatches due jobs (PENDING, or
-SCHEDULED past next_retry_at), fails NEEDS_INPUT jobs that timed out, and re-sends
+SCHEDULED past next_retry_at), fails NEEDS_INPUT jobs that timed out, reminds once about a gate left
+waiting NEEDS_INPUT_REMINDER_HOURS, and re-sends
 Telegram messages that never got through. Run this and telegram_poller.py as two
 long-running processes — see CLAUDE.md for the launchd deployment.
 """
@@ -25,6 +26,13 @@ def _handle_stale_needs_input() -> None:
             worker.notify_safely(notifier.notify_failed, job["id"])
 
 
+def _remind_waiting_gates() -> None:
+    if config.NEEDS_INPUT_REMINDER_HOURS <= 0:
+        return
+    for job in db.stale_needs_input_jobs(config.NEEDS_INPUT_REMINDER_HOURS):
+        worker.notify_safely(notifier.notify_input_reminder, job["id"])
+
+
 def _guarded(label: str, fn: Callable[[], object]) -> None:
     try:
         fn()
@@ -38,6 +46,7 @@ def tick() -> None:
         print(f"[scheduler] running job #{job['id']} stage={job['current_stage']}")
         _guarded(f"job #{job['id']}", lambda job_id=job["id"]: worker.run_job(job_id))
     _guarded("stale NEEDS_INPUT sweep", _handle_stale_needs_input)
+    _guarded("gate reminders", _remind_waiting_gates)
     _guarded("notification resend", notifier.resend_missed_notifications)
 
 

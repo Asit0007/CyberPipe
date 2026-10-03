@@ -342,3 +342,52 @@ def regenerate_scenes(job_id: int, scenes: list[int]) -> tuple[bool, str]:
                             status="PENDING", pending_question=None, pending_payload=None, attempt_count=0)
     label = "stills" if kind == "still" else "narration"
     return applied, f"Redoing {label} for scene{'s' if len(scenes) != 1 else ''} {', '.join(str(n) for n in scenes)} on job #{job_id}." if applied else f"Job #{job_id} changed while I was working; nothing was applied."
+
+
+def finish_clips(job_id: int) -> tuple[bool, str]:
+    """Telegram `/finish <job>`: stop waiting for clips and build the bundle with stills for every slot still waiting.
+
+    ContentRender has no lock of its own, and the scheduler may be about to `step` this very run, so the job is held
+    first (SCHEDULED/PENDING -> RUNNING, the same lock `run_job` takes) and released afterwards, due at once."""
+    job = db.get_job(job_id)
+    if job is None:
+        return False, f"No job #{job_id}."
+    if job["current_stage"] != "bundle" or job["status"] not in ("SCHEDULED", "PENDING"):
+        return False, f"Job #{job_id} is not waiting for clips (stage {job['current_stage']}, status {job['status']})."
+    if not db.transition(job_id, job["status"], status="RUNNING", locked_by=lock_owner(), locked_at=db.now_iso()):
+        return False, f"Job #{job_id} changed while I was working; nothing was applied. Try again in a minute."
+    try:
+        result = pipeline.finish_clips(job, job["stage_outputs"])
+    except Exception as exc:  # noqa: BLE001
+        db.transition(job_id, "RUNNING", status="SCHEDULED", next_retry_at=db.now_iso(), **UNLOCK)
+        print(f"[worker] job #{job_id}: /finish failed: {notifier.redact_secrets(str(exc))}")
+        return False, f"ContentRender refused: {notifier.redact_secrets(str(exc))[:300]}"
+    db.transition(job_id, "RUNNING", status="SCHEDULED", next_retry_at=db.now_iso(), attempt_count=0, wait_since=None, **UNLOCK)
+    finished = result.get("finished", 0)
+    if not finished:
+        return True, f"Job #{job_id}: no clip was being waited for, so nothing changed; it carries on now."
+    return True, f"Job #{job_id}: stopped waiting for {finished} clip(s); those scenes keep their still. Building the bundle now."
+
+
+def _local_time(iso: Optional[str]) -> str:
+    when = _parse_iso(iso)
+    return when.astimezone().strftime("%d %b %H:%M") if when else "—"
+
+
+def status_report() -> str:
+    """Telegram `/status`: one line per job that is not finished."""
+    jobs = db.jobs_with_status(("PENDING", "RUNNING", "SCHEDULED", "NEEDS_INPUT"))
+    if not jobs:
+        return "No active jobs."
+    lines = []
+    for job in jobs:
+        title = ((job.get("stage_outputs") or {}).get("script") or {}).get("title") or "untitled"
+        line = f"#{job['id']} {title[:60]} · {job['current_stage']} · {job['status']}"
+        if job["status"] == "SCHEDULED":
+            line += f" until {_local_time(job.get('next_retry_at'))}"
+            if job.get("last_error"):
+                line += f" ({job['last_error'].splitlines()[0][:80]})"
+        elif job["status"] == "NEEDS_INPUT":
+            line += f" since {_local_time(job.get('updated_at'))}"
+        lines.append(line)
+    return "\n".join(lines)

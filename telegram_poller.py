@@ -1,8 +1,6 @@
 """Long-polls getUpdates for inline-button taps of the form
-job:<id>:<answer> and routes them to worker.resume_from_input(). This
-prototype only handles those callback buttons — the slash-command dashboard
-(/status, /jobs, /retry, ...) from Prompt 5 is a later phase, not scaffolded
-yet.
+job:<id>:<answer> and routes them to worker.resume_from_input(), plus the
+slash commands in COMMANDS (/status, /resume, /finish, /regen, /help).
 
 Only TELEGRAM_CHAT_ID is authorized; every other chat is logged and ignored.
 
@@ -124,14 +122,31 @@ RESUME_USAGE = "Usage: /resume <job number>   e.g. /resume 12"
 
 def parse_resume(text: str) -> Optional[int]:
     """`/resume 12` -> 12; None if it does not parse."""
+    return parse_job_command("/resume", text)
+
+
+def parse_job_command(command: str, text: str) -> Optional[int]:
+    """`<command> 12` -> 12 (case-insensitive, `#12` and a `@bot` suffix accepted); None if it does not parse."""
     parts = text.split()
-    if len(parts) != 2 or parts[0].split("@")[0].lower() != "/resume":
+    if len(parts) != 2 or parts[0].split("@")[0].lower() != command:
         return None
     try:
         job_id = int(parts[1].lstrip("#"))
     except ValueError:
         return None
     return job_id if job_id > 0 else None
+
+
+FINISH_USAGE = "Usage: /finish <job number>   e.g. /finish 12"
+
+# Shown by /help, and the set of commands this poller answers. One line each.
+COMMANDS = {
+    "/status": "/status — every job that isn't finished: stage, status, and when it next runs",
+    "/resume": "/resume <job> — run a waiting job now (e.g. once you've dropped hand-made clips in)",
+    "/finish": "/finish <job> — stop waiting for clips; scenes without one keep their still",
+    "/regen": "/regen <job> <scenes> — at the stills or narration gate, redo just those scenes (e.g. /regen 12 3,7)",
+    "/help": "/help — this list",
+}
 
 
 def _handle_message(message: dict[str, Any]) -> None:
@@ -141,10 +156,36 @@ def _handle_message(message: dict[str, Any]) -> None:
     # already normalize downstream. A bare startswith("/regen") gate here used to disagree with them (a phone
     # keyboard's autocapitalized "/Resume 12" would match neither prefix and be silently dropped before parsing).
     cmd = parts[0].split("@")[0].lower() if parts else ""
-    if cmd not in ("/regen", "/resume"):
-        return  # the rest of the slash-command dashboard (/status, /jobs, ...) is a later phase
+    if cmd not in COMMANDS:
+        return
     if not _is_authorized(message.get("from", {})):
         print(f"[telegram_poller] ignoring {cmd} from unauthorized chat {message.get('from', {}).get('id')}")
+        return
+
+    if cmd == "/help":
+        _reply("\n".join(COMMANDS.values()))
+        return
+
+    if cmd == "/status":
+        try:
+            reply = worker.status_report()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[telegram_poller] /status raised: {notifier.redact_secrets(str(exc))}")
+            reply = "Something went wrong — please send it again."
+        _reply(reply)
+        return
+
+    if cmd == "/finish":
+        job_id = parse_job_command("/finish", text)
+        if job_id is None:
+            _reply(FINISH_USAGE)
+            return
+        try:
+            _, reply = worker.finish_clips(job_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[telegram_poller] job #{job_id}: /finish raised: {notifier.redact_secrets(str(exc))}")
+            reply = "Something went wrong — please send it again."
+        _reply(reply)
         return
 
     if cmd == "/resume":

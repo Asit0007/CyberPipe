@@ -11,9 +11,10 @@
   fast no-op until you add the token, at which point the very next restart
   picks it up (edit .env, then `launchctl kickstart -p ...poller`).
 
-  Build the launcher bundle first - deploy/build-launcher.sh - then copy this
-  to ~/Library/LaunchAgents/, replacing __REPO_ROOT__ with this repo's
-  absolute path and __HOME__ with your home directory, then:
+  Easiest: ./deploy/install.sh (--dry-run first). By hand: build the launcher
+  bundle - deploy/build-launcher.sh - then copy this to ~/Library/LaunchAgents/,
+  replacing __REPO_ROOT__ with this repo's absolute path and __HOME__ with your
+  home directory (XML-escaped), then:
 
       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.asitminz.cyberpipe.poller.plist
       launchctl print gui/$(id -u)/com.asitminz.cyberpipe.poller   # verify

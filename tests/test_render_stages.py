@@ -66,6 +66,12 @@ class RenderTestCase(DbTestCase):
         p = mock.patch.object(config, "BRIEFS_DIR", self.briefs.name)
         p.start()
         self.addCleanup(p.stop)
+        # Never look at the real ContentRender runs folder from a unit test.
+        self.runs = tempfile.TemporaryDirectory()
+        self.addCleanup(self.runs.cleanup)
+        p = mock.patch.object(config, "CONTENTRENDER_RUNS_DIR", self.runs.name)
+        p.start()
+        self.addCleanup(p.stop)
         self.render = FakeRender()
         p = mock.patch.object(pipeline, "_run_render", self.render)
         p.start()
@@ -567,7 +573,7 @@ class RegenCommandTests(RenderTestCase):
 
     def test_other_text_is_left_alone(self):
         telegram_poller._process_update(self.message("hello"))
-        telegram_poller._process_update(self.message("/status"))
+        telegram_poller._process_update(self.message("/jobs"))  # not a command this poller answers
         self.assertEqual(self.telegram.calls, [])
 
 

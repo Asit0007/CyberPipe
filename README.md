@@ -40,13 +40,40 @@ already keeps it up on port 3000; anywhere else:
 cd ../ContentPipe && npm run dev   # http://localhost:3000
 ```
 
-Then, from this repo:
+Then, from this repo. **The usual way (owner, 2026-10-03):** write the script with ContentPipe's
+`npm run story:start`, edit its `brief.json` by hand if you want, then hand it over; CyberPipe runs it from the stills
+onward with Telegram gates:
 
 ```bash
-python3 submit_job.py --text "A critical auth bypass in..." --url "https://..."
-python3 scheduler.py          # separate terminal — polls every 60s, runs due jobs
-python3 telegram_poller.py    # separate terminal — only needed once TELEGRAM_* is set
+./venv/bin/python submit_job.py adopt --brief "../ContentPipe/.runs/story-<slug>/brief.json"
+# a ContentRender run started by hand: pass that run's own brief (its stills and voice lines are kept)
+./venv/bin/python submit_job.py adopt --brief "../ContentRender/output/runs/<run>/brief.json"
 ```
+
+`adopt` checks the brief (valid JSON, a title, scenes with narration), finds an existing run for the same title and
+continues it only if ContentRender agrees it is the run's own brief, otherwise refuses with the way out (a different
+brief would make ContentRender start the run over). For a `story:start` brief it also asks ContentPipe for a fresh
+Markdown export, so your edits show up there (`--no-export` skips it). New runs are named `<date>-<title slug>`.
+
+Or a story from scratch, research → plan → script through ContentPipe with a Telegram script gate:
+
+```bash
+./venv/bin/python submit_job.py --text "A critical auth bypass in..." --url "https://..."
+```
+
+Only **one story runs at a time** (they share the free image and clip quotas); `--force` overrides it, on either
+command. To run the services by hand instead of installing them (see Deployment):
+
+```bash
+./venv/bin/python scheduler.py          # separate terminal — polls every 60s, runs due jobs
+./venv/bin/python telegram_poller.py    # separate terminal — only needed once TELEGRAM_* is set
+```
+
+**Telegram commands** (only your chat is answered): `/status` (every unfinished job: stage, status, next run),
+`/resume <job>` (run a waiting job now, e.g. once hand-made clips are in), `/finish <job>` (stop waiting for clips;
+scenes without one keep their still), `/regen <job> <scenes>` (at the stills or narration gate, redo just those
+scenes), `/help`. A gate left unanswered gets one reminder after `NEEDS_INPUT_REMINDER_HOURS` (24) and fails after
+`NEEDS_INPUT_TIMEOUT_HOURS` (168) without an answer. Messages name the run folder on this Mac.
 
 Two flags on `submit_job.py` are worth telling apart, because they used to be the same
 value and it produced a script that welcomed viewers to a tool:
@@ -115,7 +142,9 @@ Which component calls which model, and when, across CyberPipe → ContentPipe �
 | `BRIEFS_DIR` | No | Where the approved script is written for ContentRender. Defaults to `./data/briefs`. |
 | `DB_PATH` | No | Defaults to `pipeline.db` in this repo. |
 | `POLL_INTERVAL_SECONDS` | No | Scheduler tick interval, defaults to 60. |
-| `NEEDS_INPUT_TIMEOUT_HOURS` | No | A job waiting on your tap fails after this long, defaults to 72. |
+| `NEEDS_INPUT_TIMEOUT_HOURS` | No | A job waiting on your tap fails after this long without an answer, counted from the last message about it; defaults to 168 (a week; it was 72 until 2026-10-03). |
+| `NEEDS_INPUT_REMINDER_HOURS` | No | One reminder (with the buttons) once a gate has waited this long; defaults to 24, `0` turns it off. |
+| `CONTENTRENDER_RUNS_DIR` | No | ContentRender's runs folder; defaults to its own, `<CONTENTRENDER_DIR>/<RENDER_DIR or output>/runs`. Read only: to name a run in messages and match an existing run. |
 | `MAX_STAGE_ATTEMPTS` | No | Ordinary failures before `FAILED`, defaults to 5. |
 | `MAX_WAIT_DAYS` | No | Give up on a job that has been continuously rate-limited, waiting on a busy ContentPipe, or waiting out a provider outage (503), defaults to 7. |
 | `OVERLOAD_MAX_WAIT_SECONDS` | No | Longest gap between re-polls of a ContentPipe whose providers are overloaded, defaults to 900. |
@@ -136,7 +165,7 @@ its own temporary SQLite file:
 ./venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
-170 tests, 2 of them opt-in and skipped by default (run 2026-09-30), covering the job state machine (retry dispatch, crash recovery, regenerate/approve,
+196 tests, 2 of them opt-in and skipped by default (run 2026-10-03), covering adopt, the restart guard, run names, one story at a time, `/status` `/finish` `/help` and the gate reminder (tests/test_install_adopt.py), plus the job state machine (retry dispatch, crash recovery, regenerate/approve,
 timeouts, the clips pause and `/resume`), Telegram delivery and the poller, how ContentPipe's status codes map onto
 worker behaviour, and what the request bodies sent to ContentPipe actually contain. See `CLAUDE.md`
 "Tier 1 audit fixes" for what each guards against.
@@ -152,8 +181,9 @@ Resolve bundle.
 
 - **Built:** the clips-pause state (waits days, outside `MAX_WAIT_DAYS`, one message per day) and Telegram
   `/resume <job>`, which wakes any waiting job.
-- **Not built:** `/finish <job>` (Ken Burns for the rest), `/status`, one story at a time in `submit_job.py`, the gate
-  timeout change (72 h → 168 h), a deterministic video id (`<created-date>-<title-slug>-<job>`).
+- **Built 2026-10-03:** `submit_job.py adopt`, one story at a time, readable run names, the guard that stops a job
+  instead of letting a changed brief restart a run, `/status`, `/finish`, `/help`, the 168 h gate timeout and its 24 h
+  reminder, and `deploy/install.sh` / `uninstall.sh`.
 - **Not done, owner only:** LaunchAgents for the scheduler and poller. The Telegram bot already exists (@Cyber_Pipe_07_Bot, display name "ContentPipe"; token and chat id in `.env`, a test message delivered 2026-10-03), so no new bot is needed.
 
 **CyberPipe has never been installed or run a job** (checked 2026-10-03): a `.env` with a working Telegram bot exists, but there is
@@ -161,9 +191,8 @@ no `pipeline.db` and no LaunchAgent, and the launcher app built 2026-09-19 still
 with `deploy/build-launcher.sh` before installing). The install and remaining build are planned in `../plan-cyberpipe.md`. The first real story (OnePlus, 2026-09-30) is therefore being run by hand: ContentPipe's
 `npm run story:start` for the script, then ContentRender's command line for the media.
 
-**Next steps:** (1) finish that first story by hand; (2) owner creates the bot and fills `.env`; (3) build and install
-the launcher and the two LaunchAgents (see Deployment); (4) run the second story through CyberPipe and Telegram, which
-also closes `../plan-resolve-bundle.md`; (5) the "Not built" list above.
+**Next steps:** (1) the owner runs `./deploy/install.sh`; (2) `submit_job.py adopt` the OnePlus run with its own
+brief, and take it through the gates in Telegram, which also closes `../plan-resolve-bundle.md`.
 
 ## Current status
 
@@ -172,11 +201,11 @@ also closes `../plan-resolve-bundle.md`; (5) the "Not built" list above.
 | 1. Research | Built — calls ContentPipe `/api/research`, forwarding the target duration so the dossier is researched to the depth the script needs |
 | 2. Plan | Built — calls ContentPipe `/api/plan`, including target video duration |
 | 3. Script | Built — calls ContentPipe `/api/script`, mandatory Telegram approve/regenerate checkpoint; the approval message includes ContentPipe's audit findings (runtime shortfall, unsourced figures, mid-roll eligibility) and attaches the full draft |
-| Edit / upload a revised script | Not built — approve still commits the LLM draft as-is; the spec's "human rewrite is mandatory" needs a decision on how a revised script comes back |
+| Edit a script | Decided 2026-10-03: edit the story's `brief.json` (from `story:start`) before `submit_job.py adopt`, which checks it and re-exports. The `--text` path's Telegram script gate still commits the draft as-is |
 | 4. `images` — stills | Built (2026-09-26) — runs [ContentRender](../ContentRender)'s command line; gate: the stills as Telegram albums; `/regen <job> 3,7` redoes single scenes |
 | 5. `narration` — two-voice narration | Built — same CLI; Kokoro narrates locally, Charon (via ContentPipe) reads the analyst lines; gate: one MP3 |
 | 6. `bundle` — AI clips, then the DaVinci Resolve bundle | Built — clips run here, after the narration gate (since 2026-09-29): a clip that cannot be made becomes a Ken Burns fallback, a spent free quota pauses the job (see the table above). Then the FCPXML timeline, captions, rough-cut MP4; gate: the rough cut; approve → `COMPLETED`. Verified end to end on stub media and, for the media stages, once on real quota; the FCPXML imports into Resolve 18.6 (owner, 2026-09-27). Not yet run on a real story through Telegram: CyberPipe has never been installed |
-| Telegram `/status /jobs /retry ...` dashboard | Not started — today the approve/regenerate buttons, `/regen <job> <scenes>` and `/resume <job>` work |
+| Telegram commands | Built — approve/regenerate buttons, `/status`, `/resume`, `/finish`, `/regen`, `/help` (2026-10-03) |
 | Post-publish analytics feedback loop | Not started — needs YouTube Data + Analytics OAuth |
 
 A `COMPLETED` job now means the Resolve bundle was approved (stages 4-6 above). Full gap analysis against the original spec, including two
@@ -189,7 +218,14 @@ are set) live in `CLAUDE.md`.
 
 ## Deployment
 
-Runs on a Mac via `launchd`, not a VPS — see `CLAUDE.md`'s "Deployment —
-Mac via launchd" section for the full setup (`deploy/build-launcher.sh`,
-the two LaunchAgent plists) and why that's convenience-grade rather than
-true 24/7 durability.
+Runs on a Mac via `launchd`, not a VPS. Install both services with one command (auto-mode sessions can't, so run it
+yourself):
+
+```bash
+./deploy/install.sh --dry-run   # checks venv, .env, node, ContentRender, Kokoro, ContentPipe; renders the plists
+./deploy/install.sh             # rebuilds the launcher app, loads com.asitminz.cyberpipe.scheduler and .poller
+./deploy/uninstall.sh           # unloads and removes both; keeps pipeline.db and data/
+```
+
+See `CLAUDE.md`'s "Deployment — Mac via launchd" for why it is a launcher app and two KeepAlive agents, and why that's
+convenience-grade rather than true 24/7 durability.

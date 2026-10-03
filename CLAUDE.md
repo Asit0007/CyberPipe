@@ -9,6 +9,36 @@ retention-engineering requirements. (That file is **gitignored** in ContentPipe,
 so it exists only on this machine — it will not be in a fresh clone.) This file covers the orchestrator layer
 only: what's built, what's stubbed, and what's still a gap.
 
+## Added 2026-10-03: adopt, readable runs, the restart guard, one story at a time
+
+The owner starts stories with ContentPipe's `npm run story:start` and hands the finished script to CyberPipe, which
+runs it from the stills onward. Stages 1-3 here still work for `submit_job.py --text`.
+
+- **`submit_job.py adopt --brief <file>` (`adopt.py`).** Takes a `story:start` brief (`ContentPipe/.runs/story-<slug>/
+  brief.json`, edited by hand if wanted) or a ContentRender run's own `brief.json`. It checks the brief (JSON, title,
+  scenes with id and narration), then looks for a run with the same title and asks ContentRender `status` with this
+  brief: `ok` means it is the run's own brief, and the job starts at the stage the run's approvals imply (images →
+  narration → bundle). A same-title run that answers "the brief has changed" is **refused** with the way out (pass the
+  run's own brief, or a new `--video-id`), because `step` with a different brief moves the whole run aside and starts
+  every still again. No match: a new run `<local date>-<title slug>`. For a `story:start` brief with `research.json` and
+  `plan.json` beside it, adopt POSTs `/api/export/markdown` so the export matches hand edits (a failure only warns).
+  Verified read-only on the real OnePlus run (2026-10-03): its own brief → continue at `images`; ContentPipe's 1 Oct
+  copy → refused; the manifest's checksum unchanged.
+- **Run names (`pipeline.video_id`).** Stored as `input_payload.videoId`. A `--text` job gets
+  `<created date>-<title slug>-j<id>` on its first render call (`_ensure_video_id`), written once; a job whose
+  `job-<id>` run already exists keeps that. ContentRender's rule: `^[A-Za-z0-9_-]{1,64}$`.
+- **Restart guard (`pipeline._guard_existing_run`).** Before every `step` on an existing run, `status` with the job's
+  brief; "brief has changed" → `PermanentStageError` (❌ in Telegram, nothing touched), never a `step`. ContentRender
+  hashes a canonical form of the parsed brief (`src/brief.ts` `hashBrief`), so CyberPipe re-serialising it is safe.
+- **One story at a time** (`adopt.guard_one_story`, both `submit_job.py` paths; `--force` overrides), and adopt refuses
+  a run another active job already drives.
+- **`/finish <job>`** takes the job SCHEDULED/PENDING → RUNNING with the worker lock before calling ContentRender
+  `finish-clips` (ContentRender has no lock and the scheduler may be about to `step` the same manifest), then makes it
+  due at once. Only at the `bundle` stage.
+- **Messages** name the run folder (`pipeline.run_dir`), and the clips-pause message offers `/finish`.
+- Tests: `tests/test_install_adopt.py` (26; the restart guard and the `/finish` lock were mutation-checked). The e2e test
+  now reads the run name from `pipeline.video_id`.
+
 ## Why a separate repo from ContentPipe
 
 ContentPipe is a single-process Node/Express/Vite server with no database and
@@ -105,8 +135,10 @@ and the timeout sweep race safely: a stale read can never overwrite newer state.
   doesn't recompute it; regenerating clears it and re-runs the stage. Approve
   commits the draft and advances in **one** write. The approval message carries the
   whole draft as `job-<id>-script-draft.md` (`review.py`). `scheduler.py` fails any
-  NEEDS_INPUT job older than `config.NEEDS_INPUT_TIMEOUT_HOURS` (default 72h,
-  measured from the job's last update — a delayed notification restarts the clock).
+  NEEDS_INPUT job older than `config.NEEDS_INPUT_TIMEOUT_HOURS` (default 168 h since 2026-10-03, was 72 h;
+  measured from the job's last update — a delayed notification restarts the clock). One reminder with the buttons
+  goes out after `NEEDS_INPUT_REMINDER_HOURS` (24; `notifier.notify_input_reminder`, key `needs_input:reminder:...`
+  so a regenerate clears it); delivering it also restarts the timeout clock.
 - **Notifications** are idempotent via `jobs.notified` (a JSON list of event keys),
   and an event is recorded **only if Telegram accepted it**. Failed or held
   (bot not configured yet) events are re-sent by
@@ -155,8 +187,8 @@ back (Telegram document reply vs. re-ingest through ContentPipe).
 | 3. Script | Built — calls ContentPipe `/api/script`, raises the mandatory human checkpoint |
 | 4. `images` — stills | **Built (2026-09-26)** — runs ContentRender's CLI; gate: the stills as Telegram albums. |
 | 5. `narration` — two-voice narration (AI clips moved to stage 6, after this gate, 2026-09-29) | **Built** — same CLI; gate: one MP3 of the whole narration. Kokoro is local, Charon goes through ContentPipe. |
-| 6. `bundle` — the DaVinci Resolve bundle | **Built** — FCPXML timeline, captions, rough-cut MP4 under `ContentRender/output/runs/job-<id>/resolve/`; gate: the rough cut. Approve → COMPLETED. Verified end to end on **stub media** (tests/test_e2e_contentrender.py); the FCPXML imports into Resolve 18.6 (owner, 2026-09-27, test media). Not yet on a real story: **CyberPipe has never been installed or run a job** (a `.env` exists; no `pipeline.db`, no LaunchAgents, checked 2026-10-03; the Telegram bot @Cyber_Pipe_07_Bot exists and works). The first real story is being run by hand with ContentPipe's `story:start` and ContentRender's CLI, whose run folder is `output/runs/<videoId>/`, not `job-<id>`. |
-| Telegram `/status /jobs /retry ...` dashboard (Prompt 5) | **Not started.** `telegram_poller.py` handles the `job:<id>:<answer>` approve/regenerate buttons, `/regen <job> <scenes>` and `/resume <job>`; nothing else. |
+| 6. `bundle` — the DaVinci Resolve bundle | **Built** — FCPXML timeline, captions, rough-cut MP4 under `ContentRender/output/runs/<video id>/resolve/`; gate: the rough cut. Approve → COMPLETED. Verified end to end on **stub media** (tests/test_e2e_contentrender.py); the FCPXML imports into Resolve 18.6 (owner, 2026-09-27, test media). Not yet on a real story: **CyberPipe has never been installed or run a job** (a `.env` exists; no `pipeline.db`, no LaunchAgents, checked 2026-10-03; the Telegram bot @Cyber_Pipe_07_Bot exists and works). The first real story is being run by hand with ContentPipe's `story:start` and ContentRender's CLI, whose run folder is `output/runs/<videoId>/`, not `job-<id>`. |
+| Telegram commands | **Built.** Approve/regenerate buttons, `/regen <job> <scenes>`, `/resume <job>`, and since 2026-10-03 `/status` (`worker.status_report`), `/finish <job>` (`worker.finish_clips`) and `/help` (`telegram_poller.COMMANDS`). No `/jobs`, `/retry`, `/pause` from Prompt 5. |
 | Analytics feedback loop (Prompt 7) | **Not started.** Needs YouTube Data + Analytics OAuth. |
 
 A COMPLETED job now means the Resolve bundle was approved. `pipeline.PIPELINE_STAGES` is
@@ -165,8 +197,8 @@ A COMPLETED job now means the Resolve bundle was approved. `pipeline.PIPELINE_ST
 ### ContentRender stages (2026-09-26)
 
 `../ContentRender` is a **command line, not a server**. Each of the three stages calls
-`node node_modules/tsx/dist/cli.mjs scripts/cli.ts step --brief data/briefs/job-<id>.json --video-id job-<id>`
-(`pipeline._run_render`) and reads **one JSON outcome from the last stdout line**; the exit code only says the
+`node node_modules/tsx/dist/cli.mjs scripts/cli.ts step --brief data/briefs/job-<id>.json --video-id <video id>`
+(`pipeline._run_render` → `render_cli`) and reads **one JSON outcome from the last stdout line**; the exit code only says the
 process crashed (→ ordinary backoff). ContentRender keeps its own per-asset manifest, so a crash or a quota wall resumes where it stopped.
 
 | Outcome | Becomes |
@@ -376,6 +408,12 @@ CLAUDE.md's own framing: treat this LaunchAgent setup as a convenience for a
 laptop that's usually on, not as production-grade 24/7 durability — that
 would still mean a VPS if it ever matters (e.g. once Telegram approvals need
 to be timely even with the laptop closed for a day).
+
+**Since 2026-10-03 `./deploy/install.sh` does all of the below** (checks the venv, `.env`, an absolute `node`,
+ContentRender and Kokoro, ContentPipe; rebuilds the launcher and checks it points at this repo; renders both plists
+with XML-escaped paths and `plutil -lint`s them; unloads any old copy and loads both). `--dry-run` changes nothing;
+`./deploy/uninstall.sh` removes both agents and keeps `pipeline.db`. An auto-mode session cannot run it (LaunchAgent
+writes are refused): the owner runs it with `!`. The manual steps, for reference:
 
 **Setup**, once `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are in `.env` (the
 poller runs fine before that too — see `deploy/*.plist.example` headers):

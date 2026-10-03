@@ -22,6 +22,7 @@ import requests
 
 import config
 import db
+import pipeline
 import review
 
 API_BASE = "https://api.telegram.org"
@@ -193,22 +194,39 @@ def _notify_once(
     return True
 
 
+def _keyboard(job: dict[str, Any]) -> dict[str, Any]:
+    options = (job.get("pending_question") or {}).get("options", ["approve", "regenerate"])
+    return {"inline_keyboard": [[{"text": opt.capitalize(), "callback_data": f"job:{job['id']}:{opt}"} for opt in options]]}
+
+
+def _run_folder_line(job: dict[str, Any]) -> str:
+    """Where the files are on this Mac, for a job that has reached ContentRender."""
+    return f"\nRun folder: {pipeline.run_dir(job)}" if job.get("current_stage") in pipeline.RENDER_GATES else ""
+
+
 def notify_input_required(job: dict[str, Any]) -> bool:
     pending = job.get("pending_question") or {}
     question = pending.get("question", "Approval needed")
-    options = pending.get("options", ["approve", "regenerate"])
-    keyboard = {
-        "inline_keyboard": [[
-            {"text": opt.capitalize(), "callback_data": f"job:{job['id']}:{opt}"} for opt in options
-        ]]
-    }
-    text = f"🟡 Job #{job['id']} needs input (stage: {job['current_stage']})\n{question}"
+    keyboard = _keyboard(job)
+    text = f"🟡 Job #{job['id']} needs input (stage: {job['current_stage']})\n{question}{_run_folder_line(job)}"
     draft = review.render_review_markdown(job)
     document = (f"job-{job['id']}-script-draft.md", draft.encode("utf-8")) if draft else None
     media, media_problems = review.media_attachments(job)
     if (job.get("pending_payload") or {}).get("gate") in ("images", "narration", "final"):
         text += f"\nRegenerate redoes everything at this step; /regen {job['id']} 3,7 redoes just those scenes." if job["current_stage"] in ("images", "narration") else ""
     return _notify_once(job["id"], f"needs_input:{job['current_stage']}:{job['attempt_count']}", text, keyboard, document, media, media_problems)
+
+
+def notify_input_reminder(job: dict[str, Any]) -> bool:
+    """One reminder for a gate left unanswered NEEDS_INPUT_REMINDER_HOURS, with the buttons again. Its key starts
+    with `needs_input:`, so a regenerate (which clears that prefix) lets the next draft be reminded about too.
+    Sending it restarts the timeout clock (any delivered message does: `mark_notified` touches `updated_at`)."""
+    hours = config.NEEDS_INPUT_TIMEOUT_HOURS
+    text = (
+        f"🔔 Job #{job['id']} is still waiting for your answer (stage: {job['current_stage']}).\n"
+        f"It fails if nobody answers within {hours} h of this message.{_run_folder_line(job)}"
+    )
+    return _notify_once(job["id"], f"needs_input:reminder:{job['current_stage']}:{job['attempt_count']}", text, _keyboard(job))
 
 
 # A wait at least this long changes what the human should expect ("tomorrow", not "in a minute").
@@ -271,7 +289,8 @@ def notify_clips_paused(job: dict[str, Any], summary: dict[str, Any], retry_at_i
         f"{made} AI clip(s) made, {provided} hand-made, {waiting} still waiting, {fallback} kept as a Ken Burns still.\n"
         f"Drop a hand-made clip in the run's {summary.get('dropFolder', 'clips-in/')} folder "
         f"(see {summary.get('list', 'waiting-clips.md')} for which scene each slot needs) — it is picked up automatically.\n"
-        f"Resuming on its own around {retry_at_iso}. To resume the moment you've dropped clips in, send /resume {job['id']}."
+        f"Resuming on its own around {retry_at_iso}. To resume the moment you've dropped clips in, send /resume {job['id']}; "
+        f"to stop waiting and use stills for the rest, /finish {job['id']}.{_run_folder_line(job)}"
     )
     day = db.now_iso()[:10]
     return _notify_once(job["id"], f"clips_paused:{job['current_stage']}:{day}", text)
@@ -282,6 +301,8 @@ def notify_completed(job: dict[str, Any]) -> bool:
     bundle = ((job.get("stage_outputs") or {}).get("bundle") or {}).get("review") or {}
     if bundle.get("summary"):
         text += f"\n{bundle['summary'].splitlines()[0]}"  # first line names the bundle folder
+    if (job.get("stage_outputs") or {}).get("bundle"):
+        text += f"\nRun folder: {pipeline.run_dir(job)}\nOpen resolve/*.fcpxml in DaVinci Resolve; shotlist.md lists what to make by hand."
     return _notify_once(job["id"], "completed", text)
 
 

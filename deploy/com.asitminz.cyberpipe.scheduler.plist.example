@@ -4,9 +4,11 @@
   due jobs, not a once-a-day batch. That's a deliberately different launchd
   shape from JobPipe's: RunAtLoad + KeepAlive instead of StartCalendarInterval.
 
-  Build the launcher bundle first - deploy/build-launcher.sh - then copy this
-  to ~/Library/LaunchAgents/, replacing __REPO_ROOT__ with this repo's
-  absolute path and __HOME__ with your home directory, then:
+  Easiest: ./deploy/install.sh (it checks the setup, rebuilds the launcher,
+  fills in the paths and loads both agents; --dry-run first). By hand: build
+  the launcher bundle - deploy/build-launcher.sh - then copy this to
+  ~/Library/LaunchAgents/, replacing __REPO_ROOT__ with this repo's absolute
+  path and __HOME__ with your home directory (XML-escaped), then:
 
       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.asitminz.cyberpipe.scheduler.plist
       launchctl print gui/$(id -u)/com.asitminz.cyberpipe.scheduler   # verify
@@ -37,8 +39,10 @@
     <key>Label</key>
     <string>com.asitminz.cyberpipe.scheduler</string>
 
-    <!-- NOT scheduler.py directly, and not /bin/bash either. macOS TCC guards
-         ~/Documents and launchd has no grant there -- same failure JobPipe
+    <!-- NOT scheduler.py directly, and not /bin/bash either. Written when the
+         repo lived under ~/Documents (it is under ~/Developer since 2026-09-24,
+         which TCC does not guard, so the grant may no longer be needed). TCC
+         guards ~/Documents and launchd has no grant there -- same failure JobPipe
          measured 2026-09-10 (exit 126 on the exec itself). A grant has to
          attach to a code identity, so it attaches to this bundle - built by
          deploy/build-launcher.sh, granted once in System Settings > Privacy &

@@ -162,7 +162,8 @@ class SubmitJobBrandTests(unittest.TestCase):
     def submitted(self, *argv):
         import submit_job
 
-        with mock.patch("sys.argv", ["submit_job.py", "--text", "story", *argv]), mock.patch("submit_job.db") as db:
+        with mock.patch("sys.argv", ["submit_job.py", "--text", "story", *argv]), mock.patch("submit_job.db") as db, \
+                mock.patch("submit_job.adopt.guard_one_story"):
             db.create_job.return_value = 1
             submit_job.main()
         return db.create_job.call_args.kwargs["input_payload"]

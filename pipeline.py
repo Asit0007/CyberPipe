@@ -50,6 +50,7 @@ import json
 import os
 import re
 import subprocess
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -57,6 +58,7 @@ from typing import Any, Callable
 import requests
 
 import config
+import db
 import rate_limiter
 from exceptions import ClipsPaused, HumanInputRequired, PermanentStageError, RateLimitError, StageBusy, StageInProgress, UpstreamUnavailable
 
@@ -331,7 +333,7 @@ def stage_script(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]
 #   narration  AI clips, then two-voice narration       -> gate "narration" (Telegram: one audio file)
 #   bundle     timeline, rough cut, Resolve bundle      -> gate "final"     (Telegram: the rough cut)
 #
-# ContentRender keeps its own manifest per run (`job-<id>`), so a crash, a quota wall or a re-run resumes where
+# ContentRender keeps its own manifest per run (named by `video_id(job)`), so a crash, a quota wall or a re-run resumes where
 # it stopped; this side keeps the human decisions. Each call is `cli.ts step`, which does as much as its time
 # budget allows and prints ONE JSON outcome as its last line (see ContentRender/src/step.ts). The exit code only
 # says whether the process itself crashed, so a "rate_limited" or "error" outcome is a normal exit.
@@ -342,6 +344,47 @@ RENDER_GATES = {"images": ("images", None), "narration": ("narration", "images")
 
 def _render_command(*args: str) -> list[str]:
     return [config.CONTENTRENDER_NODE, "node_modules/tsx/dist/cli.mjs", "scripts/cli.ts", *args]
+
+
+# ContentRender's own rule for a run name (src/checkpoint/manifest.ts, VIDEO_ID).
+VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def slugify(text: str, limit: int = 40) -> str:
+    """ASCII, lowercase, hyphenated, at most `limit` characters: "How a Zero-Permission App…" -> "how-a-zero-permission-app"."""
+    ascii_text = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode()
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")
+    return slug[:limit].rstrip("-") or "video"
+
+
+def video_id(job: dict[str, Any]) -> str:
+    """The ContentRender run this job drives. Readable since 2026-10-03 (`<date>-<title slug>-j<job>`, or the id a job
+    was adopted with); `job-<id>` for a job that reached ContentRender before that, so no run is ever renamed."""
+    return (job.get("input_payload") or {}).get("videoId") or f"job-{job['id']}"
+
+
+def runs_dir() -> Path:
+    """ContentRender's runs folder, resolved now (tests and the e2e run point RENDER_DIR elsewhere)."""
+    if config.CONTENTRENDER_RUNS_DIR:
+        return Path(config.CONTENTRENDER_RUNS_DIR)
+    return Path(config.CONTENTRENDER_DIR) / (os.environ.get("RENDER_DIR") or "output") / "runs"
+
+
+def run_dir(job: dict[str, Any]) -> Path:
+    return runs_dir() / video_id(job)
+
+
+def _ensure_video_id(job: dict[str, Any], outputs: dict[str, Any]) -> None:
+    """Name the run the first time this job reaches ContentRender, and never again: a later title change must not move
+    a half-made video. A job whose `job-<id>` run already exists keeps that name."""
+    payload = job.get("input_payload") or {}
+    if payload.get("videoId") or (runs_dir() / f"job-{job['id']}").exists():
+        return
+    created = _parse_iso(job.get("created_at")) or datetime.now(timezone.utc)
+    title = (outputs.get("script") or {}).get("title") or ""
+    payload = {**payload, "videoId": f"{created:%Y-%m-%d}-{slugify(title)}-j{job['id']}"}
+    db.update_job(job["id"], input_payload=payload)
+    job["input_payload"] = payload
 
 
 def _write_brief(job: dict[str, Any], outputs: dict[str, Any]) -> Path:
@@ -358,9 +401,14 @@ def _write_brief(job: dict[str, Any], outputs: dict[str, Any]) -> Path:
 
 
 def _run_render(command: str, job: dict[str, Any], brief: Path, *extra: str) -> dict[str, Any]:
-    """Runs one ContentRender command and returns its JSON outcome. A crash, a timeout, or output that is not JSON
-    raises RuntimeError, so it takes the ordinary backoff path (5m/15m/45m...)."""
-    args = [command, "--brief", str(brief), "--video-id", f"job-{job['id']}", *extra]
+    """Runs one ContentRender command on this job's run and returns its JSON outcome. A crash, a timeout, or output
+    that is not JSON raises RuntimeError, so it takes the ordinary backoff path (5m/15m/45m...)."""
+    return render_cli(command, brief, video_id(job), *extra)
+
+
+def render_cli(command: str, brief: Path, vid: str, *extra: str) -> dict[str, Any]:
+    """`_run_render` without a job, for `adopt.py`, which asks ContentRender about a run before any job exists."""
+    args = [command, "--brief", str(brief), "--video-id", vid, *extra]
     try:
         done = subprocess.run(
             _render_command(*args), cwd=config.CONTENTRENDER_DIR, capture_output=True, text=True,
@@ -402,9 +450,33 @@ def _render_ok(command: str, job: dict[str, Any], brief: Path, *extra: str) -> d
     return outcome
 
 
+# ContentRender's refusal when a brief no longer matches the run it names (scripts/cli.ts).
+BRIEF_CHANGED = "brief has changed"
+
+
+def _guard_existing_run(job: dict[str, Any], brief: Path) -> None:
+    """`step` with a brief that differs from the run's own moves the whole run aside (`.superseded-<time>`) and starts
+    it over, every still included. Every other command refuses instead, so ask `status` first and stop the job
+    rather than let `step` do that to a half-made video."""
+    if not (run_dir(job) / "manifest.json").exists():
+        return
+    probe = _run_render("status", job, brief)
+    if probe["status"] == "ok":
+        return
+    problems = "; ".join(probe.get("problems") or [json.dumps(probe)[:200]])
+    if BRIEF_CHANGED in problems:
+        raise PermanentStageError(
+            f"ContentRender's run {video_id(job)} was made from a different brief, and continuing would start it over. "
+            f"Nothing was changed. Adopt the run's own brief ({run_dir(job) / 'brief.json'}) instead."
+        )
+    raise RuntimeError(f"ContentRender status refused: {problems}")
+
+
 def _drive(job: dict[str, Any], outputs: dict[str, Any], stage: str) -> dict[str, Any]:
     expected_gate, previous_gate = RENDER_GATES[stage]
+    _ensure_video_id(job, outputs)
     brief = _write_brief(job, outputs)
+    _guard_existing_run(job, brief)
     if previous_gate:
         # Idempotent: the human already said yes in Telegram, this makes ContentRender's manifest agree even if a
         # crash landed between the two.
@@ -464,6 +536,12 @@ ON_REGENERATE: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "narration": _hook("regenerate", "--kind", "narration", "--all"),
     "bundle": _hook("regenerate", "--kind", "render"),
 }
+
+
+def finish_clips(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]:
+    """Telegram `/finish`: stop waiting for clips; every slot still waiting keeps its still (a clip dropped in later
+    still wins on rebuild). The caller must hold the job (RUNNING) so `step` cannot run on the same manifest."""
+    return _render_ok("finish-clips", job, _write_brief(job, outputs))
 
 
 def regenerate_scenes(job: dict[str, Any], outputs: dict[str, Any], kind: str, scenes: list[int]) -> None:

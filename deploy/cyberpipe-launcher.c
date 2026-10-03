@@ -1,6 +1,11 @@
 /* A launcher whose only job is to have an identity.
  *
- * CyberPipe lives under ~/Documents, same as JobPipe, and macOS TCC guards
+ * (2026-10-03: the repo has since moved to ~/Developer, which TCC does not guard, so the Full Disk Access grant
+ * below is probably unnecessary now; the bundle is kept because it is harmless and is what the LaunchAgents
+ * name. build-launcher.sh bakes run-service.sh's ABSOLUTE path in, so rebuild after any move: deploy/install.sh
+ * does, and checks the result. What follows was written when the repo lived under ~/Documents.)
+ *
+ * CyberPipe lived under ~/Documents, same as JobPipe, and macOS TCC guards
  * that folder from launchd exactly the same way: JobPipe measured it
  * 2026-09-10 as an exit 126 on the exec itself, not a read failure inside
  * the script, while the identical command from Terminal ran fine. Terminal,

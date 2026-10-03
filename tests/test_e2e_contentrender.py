@@ -88,7 +88,7 @@ class EndToEnd(DbTestCase):
         self.assertEqual(job["pending_payload"]["gate"], "final")
         self.assertIn("sendVideo", [c["method"] for c in self.telegram.calls])
         bundle = Path(job["pending_payload"]["review"]["summary"].splitlines()[0].split(": ", 1)[1])
-        self.assertTrue((bundle / f"stub-job-{job_id}.fcpxml").is_file(), list(bundle.iterdir()))
+        self.assertTrue((bundle / f"stub-{pipeline.video_id(job)}.fcpxml").is_file(), list(bundle.iterdir()))
 
         self.assertTrue(worker.resume_from_input(job_id, "approve"))
         self.assertEqual(db.get_job(job_id)["status"], "COMPLETED")
@@ -101,7 +101,7 @@ class EndToEnd(DbTestCase):
     def test_regenerating_one_scene_from_telegram_redoes_only_that_still(self):
         job_id = self.make_job("images", stage_outputs={"script": SCRIPT})
         self.step(job_id, "NEEDS_INPUT", "images")
-        run = Path(os.environ["RENDER_DIR"]) / "runs" / f"stub-job-{job_id}"
+        run = Path(os.environ["RENDER_DIR"]) / "runs" / f"stub-{pipeline.video_id(db.get_job(job_id))}"
         before = {p.name: p.stat().st_mtime_ns for p in (run / "stills").iterdir()}
 
         ok, _ = worker.regenerate_scenes(job_id, [2])
