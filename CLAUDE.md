@@ -155,7 +155,7 @@ back (Telegram document reply vs. re-ingest through ContentPipe).
 | 3. Script | Built — calls ContentPipe `/api/script`, raises the mandatory human checkpoint |
 | 4. `images` — stills | **Built (2026-09-26)** — runs ContentRender's CLI; gate: the stills as Telegram albums. |
 | 5. `narration` — two-voice narration (AI clips moved to stage 6, after this gate, 2026-09-29) | **Built** — same CLI; gate: one MP3 of the whole narration. Kokoro is local, Charon goes through ContentPipe. |
-| 6. `bundle` — the DaVinci Resolve bundle | **Built** — FCPXML timeline, captions, rough-cut MP4 under `ContentRender/output/runs/job-<id>/resolve/`; gate: the rough cut. Approve → COMPLETED. Verified end to end on **stub media** (tests/test_e2e_contentrender.py); the FCPXML imports into Resolve 18.6 (owner, 2026-09-27, test media). Not yet on a real story: **CyberPipe has never been installed or run a job** (a `.env` exists; no `pipeline.db`, no LaunchAgents, no bot, checked 2026-09-30). The first real story is being run by hand with ContentPipe's `story:start` and ContentRender's CLI, whose run folder is `output/runs/<videoId>/`, not `job-<id>`. |
+| 6. `bundle` — the DaVinci Resolve bundle | **Built** — FCPXML timeline, captions, rough-cut MP4 under `ContentRender/output/runs/job-<id>/resolve/`; gate: the rough cut. Approve → COMPLETED. Verified end to end on **stub media** (tests/test_e2e_contentrender.py); the FCPXML imports into Resolve 18.6 (owner, 2026-09-27, test media). Not yet on a real story: **CyberPipe has never been installed or run a job** (a `.env` exists; no `pipeline.db`, no LaunchAgents, checked 2026-10-03; the Telegram bot @Cyber_Pipe_07_Bot exists and works). The first real story is being run by hand with ContentPipe's `story:start` and ContentRender's CLI, whose run folder is `output/runs/<videoId>/`, not `job-<id>`. |
 | Telegram `/status /jobs /retry ...` dashboard (Prompt 5) | **Not started.** `telegram_poller.py` handles the `job:<id>:<answer>` approve/regenerate buttons, `/regen <job> <scenes>` and `/resume <job>`; nothing else. |
 | Analytics feedback loop (Prompt 7) | **Not started.** Needs YouTube Data + Analytics OAuth. |
 
@@ -410,6 +410,12 @@ correctly signed bundle, and invoking it directly with `scheduler` / `poller`
 confirmed the full dispatch chain (bundle → bash → venv python → the
 service) works. Not yet bootstrapped into launchd — that needs the manual
 Full Disk Access grant first, which is GUI-only.
+
+**Stale since the moves (found 2026-10-03):** `build-launcher.sh` bakes `run-service.sh`'s absolute path into the binary,
+and the installed `~/Applications/CyberPipe Services.app` still points at
+`~/Documents/My VSC projects/My Persona/CyberPipe/deploy/run-service.sh`, which no longer exists. Re-run
+`./deploy/build-launcher.sh` before installing (`strings` on the binary shows the target). Full Disk Access may not be needed
+at all now that the repo is outside `~/Documents`; check the launchd logs for exit 126 first.
 
 ## Running it locally
 

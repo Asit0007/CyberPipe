@@ -154,10 +154,11 @@ Resolve bundle.
   `/resume <job>`, which wakes any waiting job.
 - **Not built:** `/finish <job>` (Ken Burns for the rest), `/status`, one story at a time in `submit_job.py`, the gate
   timeout change (72 h → 168 h), a deterministic video id (`<created-date>-<title-slug>-<job>`).
-- **Not done, owner only:** a new "Blast Radius" Telegram bot, and LaunchAgents for the scheduler and poller.
+- **Not done, owner only:** LaunchAgents for the scheduler and poller. The Telegram bot already exists (@Cyber_Pipe_07_Bot, display name "ContentPipe"; token and chat id in `.env`, a test message delivered 2026-10-03), so no new bot is needed.
 
-**CyberPipe has never been installed or run a job** (2026-09-30): a `.env` exists, but there is no `pipeline.db`, no
-LaunchAgent and no bot. The first real story (OnePlus, 2026-09-30) is therefore being run by hand: ContentPipe's
+**CyberPipe has never been installed or run a job** (checked 2026-10-03): a `.env` with a working Telegram bot exists, but there is
+no `pipeline.db` and no LaunchAgent, and the launcher app built 2026-09-19 still points at the old `~/Documents` path (rebuild it
+with `deploy/build-launcher.sh` before installing). The install and remaining build are planned in `../plan-cyberpipe.md`. The first real story (OnePlus, 2026-09-30) is therefore being run by hand: ContentPipe's
 `npm run story:start` for the script, then ContentRender's command line for the media.
 
 **Next steps:** (1) finish that first story by hand; (2) owner creates the bot and fills `.env`; (3) build and install
