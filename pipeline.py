@@ -363,11 +363,36 @@ def video_id(job: dict[str, Any]) -> str:
     return (job.get("input_payload") or {}).get("videoId") or f"job-{job['id']}"
 
 
+def _contentrender_env(key: str) -> str:
+    """A value from ContentRender's own .env. Its CLI loads that file without overriding the environment it is given
+    (process.loadEnvFile), so CyberPipe's environment wins and the file is the fallback, in that order here too."""
+    try:
+        for line in (Path(config.CONTENTRENDER_DIR) / ".env").read_text().splitlines():
+            name, sep, value = line.strip().partition("=")
+            if sep and name.strip() == key and not name.lstrip().startswith("#"):
+                return value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
 def runs_dir() -> Path:
-    """ContentRender's runs folder, resolved now (tests and the e2e run point RENDER_DIR elsewhere)."""
+    """ContentRender's runs folder, resolved now (tests and the e2e run point RENDER_DIR elsewhere): its RENDER_DIR
+    (default "output", relative to its folder) + /runs, exactly as its src/config.ts works it out."""
     if config.CONTENTRENDER_RUNS_DIR:
         return Path(config.CONTENTRENDER_RUNS_DIR)
-    return Path(config.CONTENTRENDER_DIR) / (os.environ.get("RENDER_DIR") or "output") / "runs"
+    render_dir = os.environ.get("RENDER_DIR") or _contentrender_env("RENDER_DIR") or "output"
+    return Path(config.CONTENTRENDER_DIR) / render_dir / "runs"
+
+
+def manifest_status(vid: str) -> str:
+    """The run's own status ("in_progress" | "delivered"), read from its manifest; "" when there is no readable one.
+    Read directly so a delivered run is recognised without asking ContentRender: an older ContentRender's `status`
+    moved a delivered run aside and started it over."""
+    try:
+        return str(json.loads((runs_dir() / vid / "manifest.json").read_text()).get("status") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
 
 
 def run_dir(job: dict[str, Any]) -> Path:
@@ -460,6 +485,8 @@ def _guard_existing_run(job: dict[str, Any], brief: Path) -> None:
     rather than let `step` do that to a half-made video."""
     if not (run_dir(job) / "manifest.json").exists():
         return
+    if manifest_status(video_id(job)) == "delivered":
+        raise PermanentStageError(f"ContentRender's run {video_id(job)} is already delivered; there is nothing left to render.")
     probe = _run_render("status", job, brief)
     if probe["status"] == "ok":
         return

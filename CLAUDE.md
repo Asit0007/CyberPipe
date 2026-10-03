@@ -36,8 +36,14 @@ runs it from the stills onward. Stages 1-3 here still work for `submit_job.py --
   `finish-clips` (ContentRender has no lock and the scheduler may be about to `step` the same manifest), then makes it
   due at once. Only at the `bundle` stage.
 - **Messages** name the run folder (`pipeline.run_dir`), and the clips-pause message offers `/finish`.
-- Tests: `tests/test_install_adopt.py` (26; the restart guard and the `/finish` lock were mutation-checked). The e2e test
-  now reads the run name from `pipeline.video_id`.
+- **Code review fixes (same day).** (1) A delivered run is recognised from its own `manifest.json`
+  (`pipeline.manifest_status`) and refused by adopt and the guard **before** any ContentRender call: an older
+  ContentRender's `status` went through `openRun`, which moves a delivered run aside and starts it over (fixed there
+  too, ContentRender `d071880`: `status` only reads). (2) `install.sh` waits for launchd to finish unloading and retries
+  the load, since `bootstrap` right after `bootout` fails with "5: Input/output error". (3) `runs_dir()` honours
+  `RENDER_DIR` from ContentRender's own `.env` (CyberPipe's environment wins, as in ContentRender).
+- Tests: `tests/test_install_adopt.py` (29; the restart guard, the `/finish` lock and the delivered-run refusal were
+  mutation-checked). The e2e test now reads the run name from `pipeline.video_id`.
 
 ## Why a separate repo from ContentPipe
 

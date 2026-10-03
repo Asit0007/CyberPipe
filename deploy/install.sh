@@ -86,11 +86,26 @@ mkdir -p "$ROOT/data/logs" "$AGENTS"
 ./deploy/build-launcher.sh >/dev/null || { echo "  FAIL  build-launcher.sh"; exit 1; }
 if strings "$APP_BIN" | grep -qF "$ROOT/deploy/run-service.sh"; then ok "launcher rebuilt for $ROOT"; else echo "  FAIL  the launcher does not point at $ROOT/deploy/run-service.sh"; exit 1; fi
 
+# bootout returns before launchd has finished removing the service, and a bootstrap straight after it fails with
+# "Bootstrap failed: 5: Input/output error" (code review, 2026-10-03). So: unload both, wait until launchd no longer
+# knows either label, then load each with a few retries; never stop half way with one agent down.
 for label in "${LABELS[@]}"; do
-  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null && echo "  ...   unloaded the old $label"
-  cp "$OUT/$label.plist" "$AGENTS/$label.plist"
-  if launchctl bootstrap "gui/$(id -u)" "$AGENTS/$label.plist"; then ok "loaded $label"; else echo "  FAIL  launchctl bootstrap $label"; exit 1; fi
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null && echo "  ...   unloading the old $label"
 done
+for label in "${LABELS[@]}"; do
+  for _ in $(seq 1 20); do launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || break; sleep 0.5; done
+done
+failed=0
+for label in "${LABELS[@]}"; do
+  cp "$OUT/$label.plist" "$AGENTS/$label.plist"
+  loaded=0
+  for attempt in 1 2 3 4 5; do
+    if launchctl bootstrap "gui/$(id -u)" "$AGENTS/$label.plist" 2>/dev/null; then loaded=1; break; fi
+    sleep $attempt
+  done
+  if [ $loaded = 1 ]; then ok "loaded $label"; else echo "  FAIL  could not load $label (launchctl bootstrap gui/$(id -u) \"$AGENTS/$label.plist\")"; failed=1; fi
+done
+[ $failed = 1 ] && { echo "re-run ./deploy/install.sh; if it fails again, see the command above"; exit 1; }
 sleep 3
 for label in "${LABELS[@]}"; do
   state=$(launchctl print "gui/$(id -u)/$label" 2>/dev/null | awk -F'= ' '/^\tstate/ {print $2; exit}')

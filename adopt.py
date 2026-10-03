@@ -111,6 +111,16 @@ def _runs_with_title(title: str) -> list[str]:
     return found
 
 
+def _refuse_delivered(vid: str) -> None:
+    """Never ask ContentRender about a finished run: an older one's `status` moved a delivered run aside and started
+    it over (fixed in ContentRender d071880, 2026-10-03). Read the run's own manifest instead."""
+    if pipeline.manifest_status(vid) == "delivered":
+        raise AdoptError(
+            f"run {vid} is already delivered; there is nothing left to do. To make another video from this brief, "
+            f"pass --video-id <new id>"
+        )
+
+
 def choose_run(brief_path: Path, brief: dict[str, Any], video_id: Optional[str], today: str) -> tuple[str, str]:
     """(video id, stage). An existing run is used only when ContentRender agrees the brief is the run's own."""
     if video_id is not None:
@@ -118,6 +128,7 @@ def choose_run(brief_path: Path, brief: dict[str, Any], video_id: Optional[str],
             raise AdoptError(f"--video-id {video_id!r} must be 1-64 letters, digits, '-' or '_'")
         if not (pipeline.runs_dir() / video_id / "manifest.json").is_file():
             return video_id, "images"
+        _refuse_delivered(video_id)
         status = _status(brief_path, video_id)
         if status.get("status") != "ok":
             problems = "; ".join(status.get("problems") or ["unknown refusal"])
@@ -131,6 +142,7 @@ def choose_run(brief_path: Path, brief: dict[str, Any], video_id: Optional[str],
 
     mismatched = []
     for vid in _runs_with_title(brief["title"]):
+        _refuse_delivered(vid)
         status = _status(brief_path, vid)
         if status.get("status") == "ok":
             return vid, stage_for(status)

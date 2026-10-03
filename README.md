@@ -165,7 +165,7 @@ its own temporary SQLite file:
 ./venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
-196 tests, 2 of them opt-in and skipped by default (run 2026-10-03), covering adopt, the restart guard, run names, one story at a time, `/status` `/finish` `/help` and the gate reminder (tests/test_install_adopt.py), plus the job state machine (retry dispatch, crash recovery, regenerate/approve,
+199 tests, 2 of them opt-in and skipped by default (run 2026-10-03), covering adopt, the restart guard, run names, one story at a time, `/status` `/finish` `/help` and the gate reminder (tests/test_install_adopt.py), plus the job state machine (retry dispatch, crash recovery, regenerate/approve,
 timeouts, the clips pause and `/resume`), Telegram delivery and the poller, how ContentPipe's status codes map onto
 worker behaviour, and what the request bodies sent to ContentPipe actually contain. See `CLAUDE.md`
 "Tier 1 audit fixes" for what each guards against.

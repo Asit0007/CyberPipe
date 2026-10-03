@@ -360,3 +360,47 @@ class MessageTests(Base):
         db.update_job(job_id, status="COMPLETED", stage_outputs={"script": SCRIPT, "bundle": {"delivered": True}})
         notifier.notify_completed(db.get_job(job_id))
         self.assertIn("resolve/*.fcpxml", self.telegram.messages[-1]["text"])
+
+
+class ReviewFixTests(Base):
+    """The three code-review findings of 2026-10-03."""
+
+    def deliver(self, vid: str) -> None:
+        (Path(self.runs.name) / vid / "manifest.json").write_text(json.dumps({"status": "delivered"}))
+
+    def test_adopt_never_asks_contentrender_about_a_delivered_run(self):
+        calls = []
+        with mock.patch.object(pipeline, "render_cli", lambda *a: calls.append(a) or status_ok()):
+            self.make_run("finished")
+            self.deliver("finished")
+            for kwargs in ({"video_id": "finished"}, {}):  # explicit id, and found by title
+                with self.subTest(**kwargs), self.assertRaises(adopt.AdoptError) as err:
+                    adopt.adopt(Path(self.runs.name) / "finished" / "brief.json", export=False, **kwargs)
+                self.assertIn("already delivered", str(err.exception))
+        self.assertEqual(calls, [], "a status probe of a delivered run used to move it aside (older ContentRender)")
+        self.assertEqual(sorted(p.name for p in Path(self.runs.name).iterdir()), ["finished"])
+
+    def test_the_restart_guard_stops_at_a_delivered_run_without_status_or_step(self):
+        job_id = self.job_at("bundle", input_payload={"videoId": "finished"})
+        self.make_run("finished")
+        self.deliver("finished")
+        with self.captured_stdout():
+            worker.run_job(job_id)
+        self.assertEqual(db.get_job(job_id)["status"], "FAILED")
+        self.assertIn("already delivered", db.get_job(job_id)["last_error"])
+        self.assertNotIn("status", self.render.commands())
+        self.assertNotIn("step", self.render.commands())
+
+    def test_runs_dir_follows_render_dir_in_contentrenders_own_env_and_our_env_wins(self):
+        cr = tempfile.TemporaryDirectory()
+        self.addCleanup(cr.cleanup)
+        (Path(cr.name) / ".env").write_text("# RENDER_DIR=ignored\nRENDER_DIR=\"elsewhere\"\n")
+        with mock.patch.object(config, "CONTENTRENDER_RUNS_DIR", ""), mock.patch.object(config, "CONTENTRENDER_DIR", cr.name), \
+                mock.patch.dict("os.environ", {}, clear=False) as env:
+            env.pop("RENDER_DIR", None)
+            self.assertEqual(pipeline.runs_dir(), Path(cr.name) / "elsewhere" / "runs")
+            env["RENDER_DIR"] = "/abs/render"
+            self.assertEqual(pipeline.runs_dir(), Path("/abs/render/runs"))
+            env.pop("RENDER_DIR")
+            (Path(cr.name) / ".env").unlink()
+            self.assertEqual(pipeline.runs_dir(), Path(cr.name) / "output" / "runs")
