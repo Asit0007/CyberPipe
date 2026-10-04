@@ -221,7 +221,7 @@ process crashed (→ ordinary backoff). ContentRender keeps its own per-asset ma
 ContentRender's `CLAUDE.md` rule 8 and `src/stages/clips.ts`. `pipeline._drive` raises `ClipsPaused` (`exceptions.py`)
 with the `retryAt` and a clip-status summary (`clips: {made, provided, waiting, fallback, dropFolder, list}`).
 `notifier.notify_clips_paused` sends one Telegram message per calendar day paused, naming the clip counts and where
-to drop a hand-made clip. After 3 days with nothing resolving, ContentRender itself gives up and delivers with Ken
+to drop a hand-made clip. After 7 days with nothing resolving, ContentRender itself gives up and delivers with Ken
 Burns fallbacks — this job's own `MAX_WAIT_DAYS`/backoff never fires for a clips pause, by design.
 
 Human decisions reach ContentRender's manifest: each stage first runs `approve --gate <previous>` (idempotent, so a crash between the

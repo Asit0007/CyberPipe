@@ -112,7 +112,7 @@ def run_job(job_id: int) -> None:
         retry_at = exc.retry_at or datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_CLIPS_PAUSE_WAIT_SECONDS)
         db.log_stage_run(job_id, stage, attempt, "clips_paused", started_at, db.now_iso(), provider=exc.provider, error=str(exc))
         # Like StageInProgress: no attempt consumed, no page beyond notify_clips_paused's own throttling, and
-        # wait_since is cleared — ContentRender's own 3-day give-up (GIVE_UP_MS in stages/clips.ts) is what turns
+        # wait_since is cleared — ContentRender's own 7-day give-up (GIVE_UP_MS in stages/clips.ts) is what turns
         # an endless pause into a delivered video, not this job's MAX_WAIT_DAYS clock. Clips now run after
         # narration is approved, so there is no other stage's work at risk while this waits.
         _park_without_attempt(job_id, retry_at, str(exc))

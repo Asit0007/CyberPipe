@@ -94,7 +94,7 @@ class ClipsPaused(Exception):
     made, how many are waiting, where to drop a hand-made one) instead of the generic rate-limit message,
     and so a day-after-day pause never fails the job: like StageInProgress, no attempt is consumed and
     `wait_since` is cleared on every pause, so the `MAX_WAIT_DAYS` clock never applies to it — ContentRender
-    has its own 3-day give-up (`GIVE_UP_MS` in `stages/clips.ts`) that turns the wait into a delivered video.
+    has its own 7-day give-up (`GIVE_UP_MS` in `stages/clips.ts`) that turns the wait into a delivered video.
     """
 
     def __init__(self, retry_at: Optional[datetime], summary: dict[str, Any], message: str = "", provider: str = "contentrender:video"):
