@@ -184,15 +184,22 @@ Resolve bundle.
 - **Built 2026-10-03:** `submit_job.py adopt`, one story at a time, readable run names, the guard that stops a job
   instead of letting a changed brief restart a run, `/status`, `/finish`, `/help`, the 168 h gate timeout and its 24 h
   reminder, and `deploy/install.sh` / `uninstall.sh`.
-- **Not done, owner only:** LaunchAgents for the scheduler and poller. The Telegram bot already exists (@Cyber_Pipe_07_Bot, display name "ContentPipe"; token and chat id in `.env`, a test message delivered 2026-10-03), so no new bot is needed.
+- **Installed 2026-10-03** by the owner with `./deploy/install.sh`: both LaunchAgents run, Full Disk Access was not
+  needed. Telegram bot: @Cyber_Pipe_07_Bot.
 
-**CyberPipe has never been installed or run a job** (checked 2026-10-03): a `.env` with a working Telegram bot exists, but there is
-no `pipeline.db` and no LaunchAgent, and the launcher app built 2026-09-19 still points at the old `~/Documents` path (rebuild it
-with `deploy/build-launcher.sh` before installing). The install and remaining build are planned in `../plan-cyberpipe.md`. The first real story (OnePlus, 2026-09-30) is therefore being run by hand: ContentPipe's
-`npm run story:start` for the script, then ContentRender's command line for the media.
+**Job #1 is the first real story** (*How a Zero-Permission App Could Control Your OnePlus*, adopted 2026-10-03 from the
+ContentRender run `2026-09-30-how-a-zero-permission-app-could-control`). State on 2026-10-10: stills approved, narration
+made, **waiting at the narration gate** (it times out 168 h after its last message, i.e. 2026-10-12 ~00:18 IST). The
+owner is redoing the stills whose lettering FLUX garbled, in Nano Banana Pro: scenes 4, 6, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 25, 26, 31, 34, 35, 37, 43, 44, 45, 47, 49, 50, 51; to check: 3, 29, 38, 40, 41.
 
-**Next steps:** (1) the owner runs `./deploy/install.sh`; (2) `submit_job.py adopt` the OnePlus run with its own
-brief, and take it through the gates in Telegram, which also closes `../plan-resolve-bundle.md`.
+**Next steps:** (1) once the stills are in, send the job back to the stills gate (one DB step:
+`db.transition(1, "NEEDS_INPUT", clear_notified_prefix="needs_input:", status="PENDING", current_stage="images",
+pending_question=None, pending_payload=None, attempt_count=0)`; if the gate has timed out meanwhile, the same step from
+`"FAILED"`). The next `step` adopts the replaced PNGs and sends them to Telegram. **Do not re-adopt instead:** adopt
+would start at the narration stage, whose first call approves the images gate, so the new stills would never be shown.
+(2) Approve the stills, then the narration gate again. (3) Clips run daily on the free quota (all 51 slots); hand-made
+clips go in `clips-in/`; `/finish 1` stops the wait. (4) Final gate, then Resolve. That also closes
+`../plan-resolve-bundle.md`.
 
 ## Current status
 
