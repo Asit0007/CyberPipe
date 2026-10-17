@@ -189,8 +189,9 @@ Resolve bundle.
 
 **Job #1 is the first real story** (*How a Zero-Permission App Could Control Your OnePlus*, adopted 2026-10-03 from the
 ContentRender run `2026-09-30-how-a-zero-permission-app-could-control`). State on 2026-10-17: stills approved 2026-10-03,
-narration made; the narration gate **timed out on 2026-10-11**, so the job is `FAILED` at `narration` (expected; step (1)
-below starts from `FAILED`). 2 of the 26 stills are redone (4, 6). The
+narration made; the narration gate timed out on 2026-10-11. **Later on 2026-10-17** the 28 garbled stills were remade (FLUX clean plates,
+words drawn by ContentRender's `py/lettering.py`; the owner's 4 and 6 kept) and step (1) below was run from `FAILED`
+(also clearing `last_error` and `wait_since`): the job is back at the **images gate**, stills sent to Telegram. The
 owner is redoing the stills whose lettering FLUX garbled, in Nano Banana Pro: scenes 4, 6, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 25, 26, 31, 34, 35, 37, 43, 44, 45, 47, 49, 50, 51; to check: 3, 29, 38, 40, 41.
 
 **Next steps:** (1) once the stills are in, send the job back to the stills gate (one DB step:
