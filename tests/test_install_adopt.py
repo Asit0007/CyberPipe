@@ -289,8 +289,64 @@ class FinishTests(Base):
         telegram_poller._process_update(self.message("/finish"))
         self.assertIn("Usage: /finish", self.telegram.messages[-1]["text"])
         telegram_poller._process_update(self.message("/help"))
-        for command in ("/status", "/resume", "/finish", "/regen"):
+        for command in ("/status", "/resume", "/finish", "/reopen", "/regen"):
             self.assertIn(command, self.telegram.messages[-1]["text"])
+
+
+class ReopenTests(Base):
+    def test_reopen_sends_a_finished_video_back_for_clips_and_forgets_the_old_gate_messages(self):
+        job_id = self.job_at("bundle", status="COMPLETED", notified=["needs_input:bundle:0", "completed", "clips_paused:bundle:2026-10-18"])
+        self.make_run(pipeline.video_id(db.get_job(job_id)))
+        (Path(self.runs.name) / pipeline.video_id(db.get_job(job_id)) / "manifest.json").write_text('{"status": "delivered"}')
+        seen = []
+
+        def fake(command, job, brief, *extra):
+            seen.append((command, db.get_job(job_id)["status"]))
+            return {"status": "ok", "clipSlots": [{"status": "needed"}, {"status": "needed"}, {"status": "provided"}]}
+
+        with mock.patch.object(pipeline, "_run_render", fake):
+            ok, reply = worker.reopen_clips(job_id)
+        self.assertTrue(ok)
+        self.assertEqual(seen, [("reopen", "RUNNING"), ("retry-clips", "RUNNING")], "the scheduler cannot claim it mid-call")
+        job = db.get_job(job_id)
+        self.assertEqual((job["status"], job["current_stage"]), ("SCHEDULED", "bundle"))
+        self.assertIsNone(job["locked_by"])
+        self.assertLessEqual(job["next_retry_at"], db.now_iso())
+        self.assertEqual(job["notified"], ["clips_paused:bundle:2026-10-18"], "the new final gate and completion are announced again")
+        self.assertIn("2 scene(s)", reply)
+
+    def test_a_run_that_is_not_delivered_is_only_handed_its_clips_back(self):
+        job_id = self.job_at("bundle", status="COMPLETED")
+        worker.reopen_clips(job_id)
+        self.assertEqual(self.render.commands(), ["retry-clips"])
+
+    def test_reopen_is_refused_unless_the_video_is_finished(self):
+        for stage, status in (("bundle", "SCHEDULED"), ("bundle", "NEEDS_INPUT"), ("bundle", "FAILED"), ("images", "COMPLETED")):
+            with self.subTest(stage=stage, status=status):
+                job_id = self.job_at(stage, status=status)
+                ok, _ = worker.reopen_clips(job_id)
+                self.assertFalse(ok)
+                self.assertEqual(db.get_job(job_id)["status"], status)
+        self.assertEqual(self.render.calls, [])
+
+    def test_a_refusal_leaves_the_job_finished(self):
+        job_id = self.job_at("bundle", status="COMPLETED")
+        self.render.refuse = "retry-clips"
+        with self.captured_stdout():
+            ok, reply = worker.reopen_clips(job_id)
+        self.assertFalse(ok)
+        self.assertIn("retry-clips refused", reply)
+        job = db.get_job(job_id)
+        self.assertEqual(job["status"], "COMPLETED")
+        self.assertIsNone(job["locked_by"])
+
+    def test_the_reopen_command(self):
+        job_id = self.job_at("bundle", status="COMPLETED")
+        telegram_poller._process_update(self.message(f"/reopen {job_id}"))
+        self.assertEqual(self.render.commands(), ["retry-clips"])
+        self.assertIn("reopened", self.telegram.messages[-1]["text"])
+        telegram_poller._process_update(self.message("/reopen"))
+        self.assertIn("Usage: /reopen", self.telegram.messages[-1]["text"])
 
 
 class StatusTests(Base):

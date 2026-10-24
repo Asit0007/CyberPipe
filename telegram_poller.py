@@ -1,6 +1,6 @@
 """Long-polls getUpdates for inline-button taps of the form
 job:<id>:<answer> and routes them to worker.resume_from_input(), plus the
-slash commands in COMMANDS (/status, /resume, /finish, /regen, /help).
+slash commands in COMMANDS (/status, /resume, /finish, /reopen, /regen, /help).
 
 Only TELEGRAM_CHAT_ID is authorized; every other chat is logged and ignored.
 
@@ -138,12 +138,14 @@ def parse_job_command(command: str, text: str) -> Optional[int]:
 
 
 FINISH_USAGE = "Usage: /finish <job number>   e.g. /finish 12"
+REOPEN_USAGE = "Usage: /reopen <job number>   e.g. /reopen 12"
 
 # Shown by /help, and the set of commands this poller answers. One line each.
 COMMANDS = {
     "/status": "/status — every job that isn't finished: stage, status, and when it next runs",
     "/resume": "/resume <job> — run a waiting job now (e.g. once you've dropped hand-made clips in)",
     "/finish": "/finish <job> — stop waiting for clips; scenes without one keep their still",
+    "/reopen": "/reopen <job> — a finished video goes back to filling scenes that kept a still with free AI clips, daily",
     "/regen": "/regen <job> <scenes> — at the stills or narration gate, redo just those scenes (e.g. /regen 12 3,7)",
     "/help": "/help — this list",
 }
@@ -184,6 +186,19 @@ def _handle_message(message: dict[str, Any]) -> None:
             _, reply = worker.finish_clips(job_id)
         except Exception as exc:  # noqa: BLE001
             print(f"[telegram_poller] job #{job_id}: /finish raised: {notifier.redact_secrets(str(exc))}")
+            reply = "Something went wrong — please send it again."
+        _reply(reply)
+        return
+
+    if cmd == "/reopen":
+        job_id = parse_job_command("/reopen", text)
+        if job_id is None:
+            _reply(REOPEN_USAGE)
+            return
+        try:
+            _, reply = worker.reopen_clips(job_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[telegram_poller] job #{job_id}: /reopen raised: {notifier.redact_secrets(str(exc))}")
             reply = "Something went wrong — please send it again."
         _reply(reply)
         return

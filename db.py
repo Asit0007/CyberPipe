@@ -165,7 +165,7 @@ def update_job(job_id: int, **fields: Any) -> None:
         conn.execute(f"UPDATE jobs SET {assignments} WHERE id = ?", [*values, job_id])
 
 
-def transition(job_id: int, from_status: str, *, clear_notified_prefix: Optional[str] = None, **fields: Any) -> bool:
+def transition(job_id: int, from_status: str, *, clear_notified_prefix: Optional[str | tuple[str, ...]] = None, **fields: Any) -> bool:
     """Apply `fields` iff the job is still in `from_status`; True if it was applied.
 
     All-or-nothing, so a crash cannot leave a half-applied change. `clear_notified_prefix` drops

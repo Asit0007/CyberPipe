@@ -35,6 +35,9 @@ runs it from the stills onward. Stages 1-3 here still work for `submit_job.py --
 - **`/finish <job>`** takes the job SCHEDULED/PENDING → RUNNING with the worker lock before calling ContentRender
   `finish-clips` (ContentRender has no lock and the scheduler may be about to `step` the same manifest), then makes it
   due at once. Only at the `bundle` stage.
+- **`/reopen <job>`** (2026-10-23) takes a COMPLETED `bundle` job → RUNNING with the lock, calls ContentRender `reopen`
+  (only if its manifest says delivered) then `retry-clips`, and makes it SCHEDULED and due, clearing the `needs_input:`
+  and `completed` notify keys so the new final gate is announced. A refusal leaves it COMPLETED.
 - **Messages** name the run folder (`pipeline.run_dir`), and the clips-pause message offers `/finish`.
 - **Code review fixes (same day).** (1) A delivered run is recognised from its own `manifest.json`
   (`pipeline.manifest_status`) and refused by adopt and the guard **before** any ContentRender call: an older

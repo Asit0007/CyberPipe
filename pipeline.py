@@ -571,6 +571,16 @@ def finish_clips(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]
     return _render_ok("finish-clips", job, _write_brief(job, outputs))
 
 
+def reopen_clips(job: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]:
+    """Telegram `/reopen`: a finished video goes back to making the clips it is missing. ContentRender's run is
+    reopened if it was delivered, then every scene that kept its still (not one marked "by hand") is handed back to
+    the clips stage. A clip dropped into clips-in/ later still wins. The caller must hold the job (RUNNING)."""
+    brief = _write_brief(job, outputs)
+    if manifest_status(video_id(job)) == "delivered":
+        _render_ok("reopen", job, brief)
+    return _render_ok("retry-clips", job, brief)
+
+
 def regenerate_scenes(job: dict[str, Any], outputs: dict[str, Any], kind: str, scenes: list[int]) -> None:
     """Per-scene redo from Telegram (/regen). `kind` is "still" or "narration"."""
     _render_ok("regenerate", job, _write_brief(job, outputs), "--kind", kind, "--scenes", ",".join(str(n) for n in scenes))

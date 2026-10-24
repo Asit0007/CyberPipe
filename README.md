@@ -71,7 +71,8 @@ command. To run the services by hand instead of installing them (see Deployment)
 
 **Telegram commands** (only your chat is answered): `/status` (every unfinished job: stage, status, next run),
 `/resume <job>` (run a waiting job now, e.g. once hand-made clips are in), `/finish <job>` (stop waiting for clips;
-scenes without one keep their still), `/regen <job> <scenes>` (at the stills or narration gate, redo just those
+scenes without one keep their still), `/reopen <job>` (a finished video goes back to filling the scenes that kept a
+still with free AI clips, daily, then asks for the final approval again), `/regen <job> <scenes>` (at the stills or narration gate, redo just those
 scenes), `/help`. A gate left unanswered gets one reminder after `NEEDS_INPUT_REMINDER_HOURS` (24) and fails after
 `NEEDS_INPUT_TIMEOUT_HOURS` (168) without an answer. Messages name the run folder on this Mac.
 
@@ -214,7 +215,7 @@ clips go in `clips-in/`; `/finish 1` stops the wait. (4) Final gate, then Resolv
 | 4. `images` — stills | Built (2026-09-26) — runs [ContentRender](../ContentRender)'s command line; gate: the stills as Telegram albums; `/regen <job> 3,7` redoes single scenes |
 | 5. `narration` — two-voice narration | Built — same CLI; Kokoro narrates locally, Charon (via ContentPipe) reads the analyst lines; gate: one MP3 |
 | 6. `bundle` — AI clips, then the DaVinci Resolve bundle | Built — clips run here, after the narration gate (since 2026-09-29): a clip that cannot be made becomes a Ken Burns fallback, a spent free quota pauses the job (see the table above). Then the FCPXML timeline, captions, rough-cut MP4; gate: the rough cut; approve → `COMPLETED`. Verified end to end on stub media and, for the media stages, once on real quota; the FCPXML imports into Resolve 18.6 (owner, 2026-09-27). Not yet run on a real story through Telegram: CyberPipe has never been installed |
-| Telegram commands | Built — approve/regenerate buttons, `/status`, `/resume`, `/finish`, `/regen`, `/help` (2026-10-03) |
+| Telegram commands | Built — approve/regenerate buttons, `/status`, `/resume`, `/finish`, `/reopen` (2026-10-23), `/regen`, `/help` (2026-10-03) |
 | Post-publish analytics feedback loop | Not started — needs YouTube Data + Analytics OAuth |
 
 A `COMPLETED` job now means the Resolve bundle was approved (stages 4-6 above). Full gap analysis against the original spec, including two

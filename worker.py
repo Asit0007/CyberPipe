@@ -369,6 +369,33 @@ def finish_clips(job_id: int) -> tuple[bool, str]:
     return True, f"Job #{job_id}: stopped waiting for {finished} clip(s); those scenes keep their still. Building the bundle now."
 
 
+def reopen_clips(job_id: int) -> tuple[bool, str]:
+    """Telegram `/reopen <job>`: a COMPLETED video goes back to the bundle stage to fill the scenes that kept a still
+    with free AI clips. It then pauses and resumes on the daily free quota like any clips wait, and asks for the final
+    approval again (in Telegram) once no clip is left to try. Held RUNNING while ContentRender works, like /finish."""
+    job = db.get_job(job_id)
+    if job is None:
+        return False, f"No job #{job_id}."
+    if job["current_stage"] != "bundle" or job["status"] != "COMPLETED":
+        return False, f"Job #{job_id} is not a finished video (stage {job['current_stage']}, status {job['status']})."
+    if not db.transition(job_id, "COMPLETED", status="RUNNING", locked_by=lock_owner(), locked_at=db.now_iso()):
+        return False, f"Job #{job_id} changed while I was working; nothing was applied. Try again in a minute."
+    try:
+        result = pipeline.reopen_clips(job, job["stage_outputs"])
+    except Exception as exc:  # noqa: BLE001
+        db.transition(job_id, "RUNNING", status="COMPLETED", **UNLOCK)
+        print(f"[worker] job #{job_id}: /reopen failed: {notifier.redact_secrets(str(exc))}")
+        return False, f"ContentRender refused: {notifier.redact_secrets(str(exc))[:300]}"
+    # Forget the old final-gate and completion messages: their keys would otherwise match the new ones, which would
+    # then never be sent.
+    db.transition(job_id, "RUNNING", clear_notified_prefix=("needs_input:", "completed"), status="SCHEDULED",
+                  next_retry_at=db.now_iso(), attempt_count=0, wait_since=None, last_error=None,
+                  pending_question=None, pending_payload=None, **UNLOCK)
+    waiting = sum(1 for s in result.get("clipSlots") or [] if s.get("status") == "needed")
+    return True, (f"Job #{job_id} reopened: trying free AI clips for {waiting} scene(s), a little each day as the free "
+                  f"quota allows. You'll get the final approval again when it's done; /finish stops it early.")
+
+
 def _local_time(iso: Optional[str]) -> str:
     when = _parse_iso(iso)
     return when.astimezone().strftime("%d %b %H:%M") if when else "—"
